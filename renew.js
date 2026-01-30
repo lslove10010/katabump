@@ -12,10 +12,10 @@ chromium.use(stealth);
 const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const USER_DATA_DIR = path.join(__dirname, 'ChromeData_Katabump');
 const DEBUG_PORT = 9222;
-const HEADLESS = true;
-const HTTP_PROXY = "http://xcq0607:1234567890xyz@51.75.118.18:20243"
+const HEADLESS = false;
+// const HTTP_PROXY = "xxx"
 // --- Proxy Configuration ---
-// const HTTP_PROXY = process.env.HTTP_PROXY; // e.g., http://user:pass@1.2.3.4:8080 or http://1.2.3.4:8080
+const HTTP_PROXY = process.env.HTTP_PROXY; // e.g., http://user:pass@1.2.3.4:8080 or http://1.2.3.4:8080
 let PROXY_CONFIG = null;
 
 if (HTTP_PROXY) {
@@ -162,6 +162,8 @@ async function launchNativeChrome() {
         // Chrome 命令行只接受 server 地址，认证需要在 playright 层或者插件层处理
         // 这里我们要 strip 掉 username:password
         args.push(`--proxy-server=${PROXY_CONFIG.server}`);
+        // 确保 Chrome 自身请求 localhost (如 CDP) 不走代理
+        args.push('--proxy-bypass-list=<-loopback>');
     }
 
     if (HEADLESS) {
@@ -178,6 +180,14 @@ async function launchNativeChrome() {
     for (let i = 0; i < 20; i++) {
         if (await checkPort(DEBUG_PORT)) break;
         await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (!await checkPort(DEBUG_PORT)) {
+        console.error('Chrome failed to start on port ' + DEBUG_PORT);
+        if (!checkPort(DEBUG_PORT)) {
+            try { chrome.kill(); } catch (e) { }
+        }
+        throw new Error('Chrome launch failed');
     }
 }
 
@@ -302,6 +312,9 @@ async function attemptTurnstileCdp(page) {
             username: PROXY_CONFIG.username,
             password: PROXY_CONFIG.password
         });
+    } else {
+        // 如果没有代理(或者代理无认证)，清除之前的认证信息，防止干扰
+        await context.setHTTPCredentials(null);
     }
 
     // --- 关键：注入 Hook 脚本 ---

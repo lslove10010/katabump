@@ -11,6 +11,9 @@ chromium.use(stealth);
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
 
+// 确保 localhost 不走代理
+process.env.NO_PROXY = 'localhost,127.0.0.1';
+
 // --- Proxy Configuration ---
 const HTTP_PROXY = process.env.HTTP_PROXY;
 let PROXY_CONFIG = null;
@@ -145,6 +148,7 @@ async function launchChrome() {
 
     if (PROXY_CONFIG) {
         args.push(`--proxy-server=${PROXY_CONFIG.server}`);
+        args.push('--proxy-bypass-list=<-loopback>');
     }
 
     const chrome = spawn(CHROME_PATH, args, {
@@ -157,6 +161,11 @@ async function launchChrome() {
     for (let i = 0; i < 20; i++) {
         if (await checkPort(DEBUG_PORT)) break;
         await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (!await checkPort(DEBUG_PORT)) {
+        console.error('Chrome failed to start on port ' + DEBUG_PORT);
+        throw new Error('Chrome launch failed');
     }
 }
 
@@ -268,6 +277,8 @@ async function attemptTurnstileCdp(page) {
             username: PROXY_CONFIG.username,
             password: PROXY_CONFIG.password
         });
+    } else {
+        await context.setHTTPCredentials(null);
     }
 
     await page.addInitScript(INJECTED_SCRIPT);
