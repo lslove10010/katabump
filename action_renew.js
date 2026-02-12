@@ -23,9 +23,10 @@ function maskEmail(email) {
     return `${name.slice(0, 3)}***@${domain}`;
 }
 
-// 生成安全文件名（使用原始邮箱，但日志中显示掩码）
+// 生成安全文件名（使用掩码后的邮箱）
 function getSafeUsername(username) {
-    return username.replace(/[^a-z0-9]/gi, '_');
+    const masked = maskEmail(username);
+    return masked.replace(/[^a-z0-9]/gi, '_');
 }
 
 // 保存截图
@@ -76,54 +77,110 @@ async function sendTelegramMessage(message, imagePath = null) {
     }
 }
 
-// 从页面抓取服务信息
+// 从页面抓取服务信息（优化版）
 async function getServiceInfo(page) {
     try {
-        return await page.evaluate(() => {
+        // 先等待一下确保页面渲染完成
+        await page.waitForTimeout(1000);
+        
+        const info = await page.evaluate(() => {
             const data = {};
-            const rows = document.querySelectorAll('tr, .info-row, [class*="service"], [class*="detail"]');
             
-            rows.forEach(row => {
-                const text = row.innerText || '';
-                if (text.includes('Renew period')) {
-                    const match = text.match(/Renew period\s*[:：]?\s*(.+)/i);
-                    if (match) data.renewPeriod = match[1].trim();
+            // 方法1: 查找包含 "Service information" 的区块
+            const serviceSection = Array.from(document.querySelectorAll('*')).find(el => 
+                el.innerText && el.innerText.includes('Service information')
+            );
+            
+            if (serviceSection) {
+                // 获取该区块内的所有文本
+                const sectionText = serviceSection.innerText;
+                console.log('找到 Service information 区块:', sectionText.substring(0, 200));
+            }
+            
+            // 方法2: 查找所有可能包含服务信息的元素
+            const allElements = document.querySelectorAll('div, tr, li, p');
+            
+            allElements.forEach(el => {
+                const text = el.innerText || '';
+                const lowerText = text.toLowerCase();
+                
+                // Renew period
+                if (lowerText.includes('renew period')) {
+                    const nextEl = el.nextElementSibling;
+                    if (nextEl && nextEl.innerText) {
+                        data.renewPeriod = nextEl.innerText.trim();
+                    } else {
+                        // 尝试从文本中提取
+                        const match = text.match(/renew period[:\s]+(.+)/i);
+                        if (match) data.renewPeriod = match[1].trim();
+                    }
                 }
-                if (text.includes('Expiry')) {
-                    const match = text.match(/Expiry\s*[:：]?\s*(.+)/i);
-                    if (match) data.expiry = match[1].trim();
+                
+                // Expiry
+                if (lowerText.includes('expiry') && !lowerText.includes('renew period')) {
+                    const nextEl = el.nextElementSibling;
+                    if (nextEl && nextEl.innerText) {
+                        data.expiry = nextEl.innerText.trim();
+                    } else {
+                        const match = text.match(/expiry[:\s]+(.+)/i);
+                        if (match) data.expiry = match[1].trim();
+                    }
                 }
-                if (text.includes('Auto renew')) {
-                    const match = text.match(/Auto renew\s*[:：]?\s*(.+)/i);
-                    if (match) data.autoRenew = match[1].trim();
+                
+                // Auto renew
+                if (lowerText.includes('auto renew')) {
+                    const nextEl = el.nextElementSibling;
+                    if (nextEl && nextEl.innerText) {
+                        data.autoRenew = nextEl.innerText.trim();
+                    } else {
+                        const match = text.match(/auto renew[:\s]+(.+)/i);
+                        if (match) data.autoRenew = match[1].trim();
+                    }
                 }
-                if (text.includes('Price') || text.includes('crédits')) {
-                    const match = text.match(/(?:Price|Prix)\s*[:：]?\s*(.+)/i);
-                    if (match) data.price = match[1].trim();
+                
+                // Price / crédits
+                if (lowerText.includes('price') || lowerText.includes('crédits')) {
+                    const nextEl = el.nextElementSibling;
+                    if (nextEl && nextEl.innerText) {
+                        data.price = nextEl.innerText.trim();
+                    } else {
+                        const match = text.match(/(?:price|crédits)[:\s]+(.+)/i);
+                        if (match) data.price = match[1].trim();
+                    }
                 }
             });
-
-            // 备用：直接查 td
-            if (!data.renewPeriod) {
-                const allTd = document.querySelectorAll('td');
-                allTd.forEach((td, index) => {
-                    const text = td.innerText || '';
-                    if (text.includes('Renew period') && allTd[index + 1]) {
-                        data.renewPeriod = allTd[index + 1].innerText.trim();
-                    }
-                    if (text.includes('Expiry') && allTd[index + 1]) {
-                        data.expiry = allTd[index + 1].innerText.trim();
-                    }
-                    if (text.includes('Auto renew') && allTd[index + 1]) {
-                        data.autoRenew = allTd[index + 1].innerText.trim();
-                    }
-                    if ((text.includes('Price') || text.includes('crédits')) && allTd[index + 1]) {
-                        data.price = allTd[index + 1].innerText.trim();
-                    }
+            
+            // 方法3: 查找 dt/dd 或 th/td 结构
+            if (!data.renewPeriod || !data.expiry) {
+                const rows = document.querySelectorAll('tr, .row, [class*="info"]');
+                rows.forEach(row => {
+                    const cells = row.querySelectorAll('td, th, dd, dt, [class*="col"]');
+                    cells.forEach((cell, idx) => {
+                        const cellText = cell.innerText || '';
+                        const nextCell = cells[idx + 1];
+                        
+                        if (cellText.includes('Renew period') && nextCell) {
+                            data.renewPeriod = nextCell.innerText.trim();
+                        }
+                        if (cellText.includes('Expiry') && nextCell) {
+                            data.expiry = nextCell.innerText.trim();
+                        }
+                        if (cellText.includes('Auto renew') && nextCell) {
+                            data.autoRenew = nextCell.innerText.trim();
+                        }
+                        if ((cellText.includes('Price') || cellText.includes('crédits')) && nextCell) {
+                            data.price = nextCell.innerText.trim();
+                        }
+                    });
                 });
             }
+            
             return data;
         });
+        
+        console.log('抓取到的服务信息:', info);
+        return info;
+        
     } catch (e) {
         console.error('抓取服务信息失败:', e.message);
         return {};
@@ -132,11 +189,17 @@ async function getServiceInfo(page) {
 
 // 格式化服务信息为字符串
 function formatServiceInfo(info, title = '*服务信息*') {
+    // 确保有默认值
+    const renewPeriod = info.renewPeriod || info.renew_period || 'N/A';
+    const expiry = info.expiry || info.expires || 'N/A';
+    const autoRenew = info.autoRenew || info.auto_renew || 'N/A';
+    const price = info.price || info.credits || 'N/A';
+    
     return `${title}\n` +
-           `📅 续期周期: ${info.renewPeriod || 'N/A'}\n` +
-           `⏰ 到期时间: ${info.expiry || 'N/A'}\n` +
-           `🔄 自动续期: ${info.autoRenew || 'N/A'}\n` +
-           `💰 价格: ${info.price || 'N/A'}`;
+           `📅 续期周期: ${renewPeriod}\n` +
+           `⏰ 到期时间: ${expiry}\n` +
+           `🔄 自动续期: ${autoRenew}\n` +
+           `💰 价格: ${price}`;
 }
 
 // 启用 stealth 插件
@@ -454,7 +517,7 @@ async function handleTurnstile(page, contextName = '未知') {
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
         const maskedUser = maskEmail(user.username); // 日志中显示掩码邮箱
-        const safeUser = getSafeUsername(user.username);
+        const safeUser = getSafeUsername(user.username); // 文件名使用掩码邮箱
         
         console.log(`\n=== 用户 ${i + 1}/${users.length}: ${maskedUser} ===`);
         
@@ -542,7 +605,12 @@ async function handleTurnstile(page, contextName = '未知') {
             
             // 抓取服务信息（登录后立即抓取）
             serviceInfo = await getServiceInfo(page);
-            console.log('当前服务信息:', serviceInfo);
+            console.log('抓取到的服务信息:', JSON.stringify(serviceInfo, null, 2));
+            
+            // 测试：如果抓取失败，尝试点击 See 后再抓取
+            if (!serviceInfo.expiry) {
+                console.log('首次抓取失败，尝试点击 See 后再抓取...');
+            }
             
             await sendTelegramMessage(`✅ 用户 ${maskedUser} 登录成功\nURL: ${page.url()}`, afterLoginShot);
 
@@ -581,6 +649,13 @@ async function handleTurnstile(page, contextName = '未知') {
 
             await page.waitForTimeout(2000);
             const afterSeeShot = await saveScreenshot(page, `${safeUser}_06_after_see_click.png`);
+            
+            // 点击 See 后重新抓取服务信息（更详细的信息通常在详情页）
+            const detailedInfo = await getServiceInfo(page);
+            if (detailedInfo.expiry) {
+                serviceInfo = { ...serviceInfo, ...detailedInfo };
+                console.log('详情页服务信息:', JSON.stringify(serviceInfo, null, 2));
+            }
 
             // 8. Renew 流程
             console.log('开始 Renew 流程...');
@@ -728,7 +803,7 @@ async function handleTurnstile(page, contextName = '未知') {
                     // 重新抓取服务信息（续期后）
                     await page.waitForTimeout(1000);
                     const newServiceInfo = await getServiceInfo(page);
-                    console.log('续期后服务信息:', newServiceInfo);
+                    console.log('续期后服务信息:', JSON.stringify(newServiceInfo, null, 2));
                     
                     // 使用新信息，如果没有则使用旧的
                     const info = newServiceInfo.expiry ? newServiceInfo : serviceInfo;
