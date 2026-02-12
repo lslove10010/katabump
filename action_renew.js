@@ -15,7 +15,15 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
     fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 }
 
-// 生成安全文件名
+// 隐藏邮箱敏感信息：nanning@disbox.org -> nan***@disbox.org
+function maskEmail(email) {
+    if (!email || !email.includes('@')) return '***';
+    const [name, domain] = email.split('@');
+    if (name.length <= 3) return `***@${domain}`;
+    return `${name.slice(0, 3)}***@${domain}`;
+}
+
+// 生成安全文件名（使用原始邮箱，但日志中显示掩码）
 function getSafeUsername(username) {
     return username.replace(/[^a-z0-9]/gi, '_');
 }
@@ -66,6 +74,69 @@ async function sendTelegramMessage(message, imagePath = null) {
             });
         });
     }
+}
+
+// 从页面抓取服务信息
+async function getServiceInfo(page) {
+    try {
+        return await page.evaluate(() => {
+            const data = {};
+            const rows = document.querySelectorAll('tr, .info-row, [class*="service"], [class*="detail"]');
+            
+            rows.forEach(row => {
+                const text = row.innerText || '';
+                if (text.includes('Renew period')) {
+                    const match = text.match(/Renew period\s*[:：]?\s*(.+)/i);
+                    if (match) data.renewPeriod = match[1].trim();
+                }
+                if (text.includes('Expiry')) {
+                    const match = text.match(/Expiry\s*[:：]?\s*(.+)/i);
+                    if (match) data.expiry = match[1].trim();
+                }
+                if (text.includes('Auto renew')) {
+                    const match = text.match(/Auto renew\s*[:：]?\s*(.+)/i);
+                    if (match) data.autoRenew = match[1].trim();
+                }
+                if (text.includes('Price') || text.includes('crédits')) {
+                    const match = text.match(/(?:Price|Prix)\s*[:：]?\s*(.+)/i);
+                    if (match) data.price = match[1].trim();
+                }
+            });
+
+            // 备用：直接查 td
+            if (!data.renewPeriod) {
+                const allTd = document.querySelectorAll('td');
+                allTd.forEach((td, index) => {
+                    const text = td.innerText || '';
+                    if (text.includes('Renew period') && allTd[index + 1]) {
+                        data.renewPeriod = allTd[index + 1].innerText.trim();
+                    }
+                    if (text.includes('Expiry') && allTd[index + 1]) {
+                        data.expiry = allTd[index + 1].innerText.trim();
+                    }
+                    if (text.includes('Auto renew') && allTd[index + 1]) {
+                        data.autoRenew = allTd[index + 1].innerText.trim();
+                    }
+                    if ((text.includes('Price') || text.includes('crédits')) && allTd[index + 1]) {
+                        data.price = allTd[index + 1].innerText.trim();
+                    }
+                });
+            }
+            return data;
+        });
+    } catch (e) {
+        console.error('抓取服务信息失败:', e.message);
+        return {};
+    }
+}
+
+// 格式化服务信息为字符串
+function formatServiceInfo(info, title = '*服务信息*') {
+    return `${title}\n` +
+           `📅 续期周期: ${info.renewPeriod || 'N/A'}\n` +
+           `⏰ 到期时间: ${info.expiry || 'N/A'}\n` +
+           `🔄 自动续期: ${info.autoRenew || 'N/A'}\n` +
+           `💰 价格: ${info.price || 'N/A'}`;
 }
 
 // 启用 stealth 插件
@@ -382,12 +453,15 @@ async function handleTurnstile(page, contextName = '未知') {
     // 处理每个用户
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
+        const maskedUser = maskEmail(user.username); // 日志中显示掩码邮箱
         const safeUser = getSafeUsername(user.username);
-        console.log(`\n=== 用户 ${i + 1}/${users.length}: ${user.username} ===`);
+        
+        console.log(`\n=== 用户 ${i + 1}/${users.length}: ${maskedUser} ===`);
         
         let status = 'unknown';
         let message = '';
         let finalScreenshot = null;
+        let serviceInfo = {}; // 存储服务信息
 
         try {
             if (page.isClosed()) {
@@ -406,7 +480,7 @@ async function handleTurnstile(page, contextName = '未知') {
             
             // 截图：登录页初始状态
             const loginInitShot = await saveScreenshot(page, `${safeUser}_01_login_init.png`);
-            await sendTelegramMessage(`🔄 开始处理用户: ${user.username}\n步骤: 进入登录页`, loginInitShot);
+            await sendTelegramMessage(`🔄 开始处理用户: ${maskedUser}\n步骤: 进入登录页`, loginInitShot);
 
             // 3. 输入凭据
             console.log('输入凭据...');
@@ -429,10 +503,9 @@ async function handleTurnstile(page, contextName = '未知') {
             
             if (!turnstileResult.success) {
                 await sendTelegramMessage(
-                    `⚠️ 用户: ${user.username}\n登录页 Turnstile 可能未通过\n原因: ${turnstileResult.reason}`, 
+                    `⚠️ 用户: ${maskedUser}\n登录页 Turnstile 可能未通过\n原因: ${turnstileResult.reason}`, 
                     loginVerifyShot
                 );
-                // 继续尝试，因为有时验证是自动的
             }
 
             // 5. 点击登录
@@ -458,7 +531,7 @@ async function handleTurnstile(page, contextName = '未知') {
                 
                 console.error(`❌ 登录失败: ${failReason}`);
                 status = 'login_failed';
-                message = `❌ *登录失败*\n用户: ${user.username}\n原因: ${failReason}`;
+                message = `❌ *登录失败*\n用户: ${maskedUser}\n原因: ${failReason}`;
                 finalScreenshot = afterLoginShot;
                 
                 await sendTelegramMessage(message, finalScreenshot);
@@ -466,7 +539,12 @@ async function handleTurnstile(page, contextName = '未知') {
             }
 
             console.log('✅ 登录成功，当前 URL:', page.url());
-            await sendTelegramMessage(`✅ 用户 ${user.username} 登录成功\nURL: ${page.url()}`, afterLoginShot);
+            
+            // 抓取服务信息（登录后立即抓取）
+            serviceInfo = await getServiceInfo(page);
+            console.log('当前服务信息:', serviceInfo);
+            
+            await sendTelegramMessage(`✅ 用户 ${maskedUser} 登录成功\nURL: ${page.url()}`, afterLoginShot);
 
             // 7. 寻找 "See" 链接
             console.log('寻找 See 链接...');
@@ -494,7 +572,7 @@ async function handleTurnstile(page, contextName = '未知') {
                 }
                 
                 status = 'no_see_link';
-                message = `❌ *未找到 See 链接*\n用户: ${user.username}\n页面链接: ${linkTexts.join(', ') || '无'}`;
+                message = `❌ *未找到 See 链接*\n用户: ${maskedUser}\n页面链接: ${linkTexts.join(', ') || '无'}\n\n${formatServiceInfo(serviceInfo)}`;
                 finalScreenshot = dashboardShot;
                 
                 await sendTelegramMessage(message, finalScreenshot);
@@ -617,7 +695,7 @@ async function handleTurnstile(page, contextName = '未知') {
 
                 if (isNotTimeYet) {
                     status = 'not_time';
-                    message = `⏳ *暂无法续期*\n用户: ${user.username}\n原因: 未到续期时间`;
+                    message = `⏳ *暂无法续期*\n用户: ${maskedUser}\n原因: 未到续期时间\n\n${formatServiceInfo(serviceInfo)}`;
                     finalScreenshot = resultShot;
                     renewSuccess = true; // 标记完成，不再重试
                     
@@ -633,7 +711,7 @@ async function handleTurnstile(page, contextName = '未知') {
                 if (hasCaptchaError) {
                     console.log('验证码错误，刷新重试...');
                     await sendTelegramMessage(
-                        `⚠️ 用户 ${user.username} 第 ${attempt} 次尝试\n验证码未通过，准备刷新重试`, 
+                        `⚠️ 用户 ${maskedUser} 第 ${attempt} 次尝试\n验证码未通过，准备刷新重试`, 
                         resultShot
                     );
                     await page.reload();
@@ -646,7 +724,16 @@ async function handleTurnstile(page, contextName = '未知') {
                 if (!await modal.isVisible().catch(() => false)) {
                     console.log('✅ Renew 成功！');
                     status = 'success';
-                    message = `✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期`;
+                    
+                    // 重新抓取服务信息（续期后）
+                    await page.waitForTimeout(1000);
+                    const newServiceInfo = await getServiceInfo(page);
+                    console.log('续期后服务信息:', newServiceInfo);
+                    
+                    // 使用新信息，如果没有则使用旧的
+                    const info = newServiceInfo.expiry ? newServiceInfo : serviceInfo;
+                    
+                    message = `✅ *续期成功*\n用户: ${maskedUser}\n\n${formatServiceInfo(info, '*续期后服务信息*')}`;
                     finalScreenshot = resultShot;
                     renewSuccess = true;
                     
@@ -655,7 +742,7 @@ async function handleTurnstile(page, contextName = '未知') {
                 } else {
                     console.log('模态框仍在，可能失败，准备重试...');
                     await sendTelegramMessage(
-                        `⚠️ 用户 ${user.username} 第 ${attempt} 次尝试\n模态框未关闭，准备重试`, 
+                        `⚠️ 用户 ${maskedUser} 第 ${attempt} 次尝试\n模态框未关闭，准备重试`, 
                         resultShot
                     );
                     await page.reload();
@@ -665,7 +752,13 @@ async function handleTurnstile(page, contextName = '未知') {
 
             if (!renewSuccess && !isNotTimeYet) {
                 status = 'renew_failed';
-                message = `❌ *续期失败*\n用户: ${user.username}\n原因: 20次尝试后仍未成功`;
+                
+                // 重新抓取最新服务信息（失败时）
+                await page.waitForTimeout(1000);
+                const latestInfo = await getServiceInfo(page);
+                const info = latestInfo.expiry ? latestInfo : serviceInfo;
+                
+                message = `❌ *续期失败*\n用户: ${maskedUser}\n原因: 20次尝试后仍未成功\n\n${formatServiceInfo(info)}`;
                 finalScreenshot = await saveScreenshot(page, `${safeUser}_09_final_failed.png`);
                 await sendTelegramMessage(message, finalScreenshot);
             }
@@ -673,7 +766,14 @@ async function handleTurnstile(page, contextName = '未知') {
         } catch (err) {
             console.error(`处理用户时出错:`, err);
             status = 'error';
-            message = `❌ *处理出错*\n用户: ${user.username}\n错误: ${err.message}`;
+            
+            // 尝试抓取服务信息（即使出错也尝试）
+            try {
+                const errorInfo = await getServiceInfo(page);
+                if (errorInfo.expiry) serviceInfo = errorInfo;
+            } catch (e) {}
+            
+            message = `❌ *处理出错*\n用户: ${maskedUser}\n错误: ${err.message}\n\n${formatServiceInfo(serviceInfo)}`;
             
             try {
                 finalScreenshot = await saveScreenshot(page, `${safeUser}_error.png`);
@@ -685,7 +785,7 @@ async function handleTurnstile(page, contextName = '未知') {
         // 最终截图
         try {
             const finalShot = await saveScreenshot(page, `${safeUser}_final_${status}.png`);
-            console.log(`用户 ${user.username} 处理完成，状态: ${status}`);
+            console.log(`用户 ${maskedUser} 处理完成，状态: ${status}`);
         } catch (e) {
             console.log('最终截图失败');
         }
