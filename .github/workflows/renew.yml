@@ -36,9 +36,9 @@ jobs:
       # 使用 xvfb-run 模拟有头环境运行
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
-    - name: Upload Screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: screenshots
-        path: screenshots/
+ #   - name: Upload Screenshots
+ #     if: always()
+ #     uses: actions/upload-artifact@v4
+ #     with:
+ #       name: screenshots
+ #       path: screenshots/
