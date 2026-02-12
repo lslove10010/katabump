@@ -319,21 +319,63 @@ async function findSeeLink(page) {
         console.log('通过 CSS 选择器未找到 "See" 链接');
     }
     
-    // 策略4: 检查 href 包含唯一业务路径
+    // 策略4: 检查 href 包含特定业务路径
     try {
-        const links = await page.$$('a[href*="/dashboard"]'); // 假设业务路径包含 /dashboard
+        // 尝试查找包含 dashboard 路径的链接
+        const links = await page.$$('a[href*="/dashboard"]');
         for (const link of links) {
             const text = await link.textContent();
             if (text.trim() === 'See') {
-                console.log('找到 "See" 链接 (通过 href 定位)');
+                console.log('找到 "See" 链接 (通过 href 包含 /dashboard 定位)');
+                return link;
+            }
+        }
+        
+        // 尝试查找包含 servers/edit 路径的链接 (根据之前的图片信息推测)
+        const serverLinks = await page.$$('a[href*="/servers/edit"]');
+        for (const link of serverLinks) {
+            const text = await link.textContent();
+            if (text.trim() === 'See') {
+                console.log('找到 "See" 链接 (通过 href 包含 /servers/edit 定位)');
+                return link;
+            }
+        }
+        
+        // 尝试查找包含 edit 路径的链接
+        const editLinks = await page.$$('a[href*="/edit"]');
+        for (const link of editLinks) {
+            const text = await link.textContent();
+            if (text.trim() === 'See') {
+                console.log('找到 "See" 链接 (通过 href 包含 /edit 定位)');
                 return link;
             }
         }
     } catch (e) {
-        console.log('通过 href 未找到 "See" 链接');
+        console.log('通过 href 特定路径未找到 "See" 链接');
+    }
+
+    // 策略5: 使用更通用的 href 模式匹配
+    try {
+        const allLinks = await page.$$('a[href]');
+        for (const link of allLinks) {
+            const href = await link.getAttribute('href');
+            const text = await link.textContent();
+            
+            // 检查链接是否符合常见的业务路径模式
+            if (text.trim() === 'See' && 
+                (href.includes('/dashboard') || 
+                 href.includes('/server') || 
+                 href.includes('/edit') ||
+                 href.includes('/show'))) {
+                console.log(`找到 "See" 链接 (通过通用 href 模式匹配: ${href})`);
+                return link;
+            }
+        }
+    } catch (e) {
+        console.log('通过通用 href 模式匹配未找到 "See" 链接');
     }
     
-    // 策略5: 如果以上都失败，截屏以便调试
+    // 策略6: 如果以上都失败，截屏以便调试
     const fs = require('fs');
     const path = require('path');
     const photoDir = path.join(process.cwd(), 'screenshots');
