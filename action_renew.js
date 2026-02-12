@@ -275,6 +275,80 @@ async function attemptTurnstileCdp(page) {
     return false;
 }
 
+// 增强的元素查找函数
+async function findSeeLink(page) {
+    console.log('正在使用多种策略查找 "See" 链接...');
+    
+    // 记录当前页面信息
+    console.log(`当前页面 URL: ${page.url()}`);
+    console.log(`当前页面标题: ${await page.title()}`);
+    
+    // 策略1: 使用 role 定位
+    try {
+        const linkByRole = page.getByRole('link', { name: 'See' });
+        if (await linkByRole.count() > 0) {
+            console.log('找到 "See" 链接 (通过 role 定位)');
+            return linkByRole.first();
+        }
+    } catch (e) {
+        console.log('通过 role 未找到 "See" 链接');
+    }
+    
+    // 策略2: 使用文本内容定位
+    try {
+        const linkByText = page.getByText('See');
+        if (await linkByText.count() > 0) {
+            console.log('找到 "See" 链接 (通过文本定位)');
+            return linkByText.first();
+        }
+    } catch (e) {
+        console.log('通过文本未找到 "See" 链接');
+    }
+    
+    // 策略3: 使用 CSS 选择器定位
+    try {
+        const links = await page.$$('a');
+        for (const link of links) {
+            const text = await link.textContent();
+            if (text.trim() === 'See') {
+                console.log('找到 "See" 链接 (通过 CSS 选择器定位)');
+                return link;
+            }
+        }
+    } catch (e) {
+        console.log('通过 CSS 选择器未找到 "See" 链接');
+    }
+    
+    // 策略4: 检查 href 包含唯一业务路径
+    try {
+        const links = await page.$$('a[href*="/dashboard"]'); // 假设业务路径包含 /dashboard
+        for (const link of links) {
+            const text = await link.textContent();
+            if (text.trim() === 'See') {
+                console.log('找到 "See" 链接 (通过 href 定位)');
+                return link;
+            }
+        }
+    } catch (e) {
+        console.log('通过 href 未找到 "See" 链接');
+    }
+    
+    // 策略5: 如果以上都失败，截屏以便调试
+    const fs = require('fs');
+    const path = require('path');
+    const photoDir = path.join(process.cwd(), 'screenshots');
+    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+    const screenshotPath = path.join(photoDir, 'debug_see_link_not_found.png');
+    try {
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`调试截图已保存至: ${screenshotPath}`);
+    } catch (e) {
+        console.log('截图失败:', e.message);
+    }
+    
+    return null;
+}
+
 (async () => {
     const users = getUsers();
     if (users.length === 0) {
