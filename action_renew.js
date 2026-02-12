@@ -1,74 +1,70 @@
 const { chromium } = require('playwright-extra');
 const stealth = require('puppeteer-extra-plugin-stealth')();
 const axios = require('axios');
-const FormData = require('form-data');
-const { spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { spawn, exec } = require('child_process');
 const http = require('http');
 
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
-// 隐藏邮箱敏感信息
-function maskEmail(email) {
-    if (!email || !email.includes('@')) return '***';
-    const [name, domain] = email.split('@');
-    if (name.length <= 3) return `***@${domain}`;
-    return `${name.slice(0, 3)}***@${domain}`;
+// 截图目录
+const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
+if (!fs.existsSync(SCREENSHOT_DIR)) {
+    fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
 }
 
-// 发送 Telegram 文字消息
-async function sendTelegramMessage(message) {
+// 生成安全文件名
+function getSafeUsername(username) {
+    return username.replace(/[^a-z0-9]/gi, '_');
+}
+
+// 保存截图
+async function saveScreenshot(page, filename) {
+    const filepath = path.join(SCREENSHOT_DIR, filename);
+    try {
+        await page.screenshot({ path: filepath, fullPage: true });
+        console.log(`📸 截图已保存: ${filename}`);
+        return filepath;
+    } catch (e) {
+        console.error('截图失败:', e.message);
+        return null;
+    }
+}
+
+// 发送 Telegram 消息
+async function sendTelegramMessage(message, imagePath = null) {
     if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-        console.log('[Telegram] 未配置');
+        console.log('[Telegram] 未配置，跳过发送');
         return;
     }
+
+    // 1. 发送文字消息
     try {
-        await axios.post(`https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`, {
+        const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
+        await axios.post(url, {
             chat_id: TG_CHAT_ID,
             text: message,
             parse_mode: 'Markdown'
         });
-        console.log('[Telegram] 文字已发送');
+        console.log('[Telegram] 文字消息已发送');
     } catch (e) {
-        console.error('[Telegram] 文字发送失败:', e.message);
+        console.error('[Telegram] 文字消息发送失败:', e.message);
     }
-}
 
-// 发送截图到 Telegram（内存中直接发送，不保存文件）
-async function sendTelegramScreenshot(page, caption = 'Screenshot') {
-    if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-        console.log('[Telegram] 未配置，跳过截图');
-        return;
-    }
-    
-    try {
-        console.log('[Telegram] 正在发送截图...');
+    // 2. 发送图片
+    if (imagePath && fs.existsSync(imagePath)) {
+        console.log('[Telegram] 正在发送图片...');
+        const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imagePath}" -F caption="Debug Screenshot"`;
         
-        // 截图到 Buffer（内存中，不保存文件）
-        const screenshotBuffer = await page.screenshot({ 
-            fullPage: true,
-            type: 'png'
+        await new Promise(resolve => {
+            exec(cmd, (err) => {
+                if (err) console.error('[Telegram] 图片发送失败:', err.message);
+                else console.log('[Telegram] 图片已发送');
+                resolve();
+            });
         });
-        
-        // 使用 FormData 发送
-        const form = new FormData();
-        form.append('chat_id', TG_CHAT_ID);
-        form.append('caption', caption);
-        form.append('photo', screenshotBuffer, {
-            filename: 'screenshot.png',
-            contentType: 'image/png'
-        });
-        
-        await axios.post(
-            `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto`,
-            form,
-            { headers: form.getHeaders() }
-        );
-        
-        console.log('[Telegram] 截图已发送');
-    } catch (e) {
-        console.error('[Telegram] 截图发送失败:', e.message);
-        await sendTelegramMessage(`⚠️ 截图发送失败: ${e.message}`);
     }
 }
 
@@ -77,8 +73,10 @@ chromium.use(stealth);
 
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
+
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
+// Proxy Configuration
 const HTTP_PROXY = process.env.HTTP_PROXY;
 let PROXY_CONFIG = null;
 
@@ -90,8 +88,9 @@ if (HTTP_PROXY) {
             username: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : undefined,
             password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : undefined
         };
+        console.log(`[代理] 配置: ${PROXY_CONFIG.server}, 认证: ${PROXY_CONFIG.username ? '是' : '否'}`);
     } catch (e) {
-        console.error('[代理] 格式无效');
+        console.error('[代理] 格式无效，期望: http://user:pass@host:port');
         process.exit(1);
     }
 }
@@ -100,7 +99,7 @@ if (HTTP_PROXY) {
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
-    
+
     function getRandomInt(min, max) {
         return Math.floor(Math.random() * (max - min + 1)) + min;
     }
@@ -127,12 +126,7 @@ const INJECTED_SCRIPT = `
                         if (rect.width > 0 && rect.height > 0) {
                             const xRatio = (rect.left + rect.width / 2) / window.innerWidth;
                             const yRatio = (rect.top + rect.height / 2) / window.innerHeight;
-                            window.__turnstile_data = { 
-                                xRatio, 
-                                yRatio, 
-                                found: true,
-                                timestamp: Date.now()
-                            };
+                            window.__turnstile_data = { xRatio, yRatio, found: true };
                             return true;
                         }
                     }
@@ -148,12 +142,15 @@ const INJECTED_SCRIPT = `
             }
             return shadowRoot;
         };
-    } catch (e) { }
+    } catch (e) {
+        console.error('[注入] Hook 失败:', e);
+    }
 })();
 `;
 
 async function checkProxy() {
     if (!PROXY_CONFIG) return true;
+    console.log('[代理] 验证连接...');
     try {
         const axiosConfig = {
             proxy: {
@@ -170,6 +167,7 @@ async function checkProxy() {
             };
         }
         await axios.get('https://www.google.com', axiosConfig);
+        console.log('[代理] 连接成功');
         return true;
     } catch (error) {
         console.error(`[代理] 连接失败: ${error.message}`);
@@ -179,19 +177,23 @@ async function checkProxy() {
 
 function checkPort(port) {
     return new Promise((resolve) => {
-        const req = http.get(`http://localhost:${port}/json/version`, () => resolve(true));
+        const req = http.get(`http://localhost:${port}/json/version`, (res) => {
+            resolve(true);
+        });
         req.on('error', () => resolve(false));
         req.end();
     });
 }
 
 async function launchChrome() {
-    console.log('检查 Chrome...');
+    console.log('检查 Chrome 是否已在端口 ' + DEBUG_PORT + ' 上运行...');
     if (await checkPort(DEBUG_PORT)) {
         console.log('Chrome 已开启');
         return;
     }
-    console.log('启动 Chrome...');
+
+    console.log(`正在启动 Chrome: ${CHROME_PATH}`);
+
     const args = [
         `--remote-debugging-port=${DEBUG_PORT}`,
         '--no-first-run',
@@ -203,16 +205,28 @@ async function launchChrome() {
         '--user-data-dir=/tmp/chrome_user_data',
         '--disable-dev-shm-usage'
     ];
+
     if (PROXY_CONFIG) {
         args.push(`--proxy-server=${PROXY_CONFIG.server}`);
         args.push('--proxy-bypass-list=<-loopback>');
     }
-    const chrome = spawn(CHROME_PATH, args, { detached: true, stdio: 'ignore' });
+
+    const chrome = spawn(CHROME_PATH, args, {
+        detached: true,
+        stdio: 'ignore'
+    });
     chrome.unref();
+
+    console.log('等待 Chrome 初始化...');
     for (let i = 0; i < 20; i++) {
         if (await checkPort(DEBUG_PORT)) break;
         await new Promise(r => setTimeout(r, 1000));
     }
+
+    if (!await checkPort(DEBUG_PORT)) {
+        throw new Error('Chrome 启动失败');
+    }
+    console.log('Chrome 启动成功');
 }
 
 function getUsers() {
@@ -227,76 +241,28 @@ function getUsers() {
     return [];
 }
 
-// 等待 Turnstile iframe 加载（增加重试次数和时间）
-async function waitForTurnstileFrame(page, maxWaitTime = 30000) {
-    console.log(`等待 Turnstile iframe 加载（最多 ${maxWaitTime}ms）...`);
-    const startTime = Date.now();
-    let checkCount = 0;
-    
-    while (Date.now() - startTime < maxWaitTime) {
-        const frames = page.frames();
-        const turnstileFrame = frames.find(f => 
-            f.url().includes('turnstile') || 
-            f.url().includes('cloudflare') ||
-            f.url().includes('challenges')
-        );
-        
-        if (turnstileFrame) {
-            console.log(`✅ Turnstile iframe 已找到（耗时 ${Date.now() - startTime}ms）`);
-            return turnstileFrame;
-        }
-        
-        checkCount++;
-        if (checkCount % 5 === 0) {
-            console.log(`  ... 已等待 ${Date.now() - startTime}ms，继续检查...`);
-        }
-        
-        await page.waitForTimeout(500); // 每500ms检查一次
-    }
-    
-    console.log(`⚠️ ${maxWaitTime}ms 内未找到 Turnstile iframe`);
-    return null;
-}
-
-// 处理 Turnstile 验证（增加等待时间）
+// 处理 Turnstile 验证（通用函数）
 async function handleTurnstile(page, contextName = '未知') {
-    console.log(`[${contextName}] 开始处理 Turnstile...`);
+    console.log(`[${contextName}] 检查 Turnstile...`);
     
-    // 1. 等待 iframe 加载（最长30秒）
-    const turnstileFrame = await waitForTurnstileFrame(page, 30000);
+    const frames = page.frames();
+    const turnstileFrame = frames.find(f => 
+        f.url().includes('turnstile') || 
+        f.url().includes('cloudflare') ||
+        f.url().includes('challenges')
+    );
     
     if (!turnstileFrame) {
         console.log(`[${contextName}] 未发现 Turnstile iframe`);
         return { success: false, reason: 'not_found' };
     }
     
-    console.log(`[${contextName}] ✅ 发现 Turnstile，等待渲染完成...`);
-    
-    // 2. 等待 iframe 内元素渲染（额外等待3-5秒）
-    await page.waitForTimeout(3000 + Math.random() * 2000);
+    console.log(`[${contextName}] ✅ 发现 Turnstile，尝试验证...`);
     
     try {
-        // 3. 等待注入脚本检测到坐标（最多等10秒）
-        let turnstileData = null;
-        let dataCheckAttempts = 0;
-        const maxDataAttempts = 20; // 最多检查20次，每次500ms = 10秒
+        // 方法1: 使用注入脚本获取精确坐标
+        const turnstileData = await turnstileFrame.evaluate(() => window.__turnstile_data).catch(() => null);
         
-        while (dataCheckAttempts < maxDataAttempts) {
-            turnstileData = await turnstileFrame.evaluate(() => window.__turnstile_data).catch(() => null);
-            
-            if (turnstileData && turnstileData.found) {
-                console.log(`[${contextName}] ✅ 检测到复选框坐标（尝试 ${dataCheckAttempts + 1} 次）`);
-                break;
-            }
-            
-            dataCheckAttempts++;
-            if (dataCheckAttempts % 5 === 0) {
-                console.log(`[${contextName}]   ... 等待复选框渲染 (${dataCheckAttempts}/${maxDataAttempts})`);
-            }
-            await page.waitForTimeout(500);
-        }
-        
-        // 4. 执行点击
         if (turnstileData && turnstileData.found) {
             const iframeElement = await turnstileFrame.frameElement();
             const box = await iframeElement.boundingBox();
@@ -326,8 +292,8 @@ async function handleTurnstile(page, contextName = '未知') {
                 await client.detach();
             }
         } else {
-            // 备用：点击 iframe 中心
-            console.log(`[${contextName}] ⚠️ 未检测到坐标，使用备用方案：点击 iframe 中心`);
+            // 方法2: 点击 iframe 中心
+            console.log(`[${contextName}] 使用备用方法：点击中心`);
             const iframeElement = await turnstileFrame.frameElement();
             const box = await iframeElement.boundingBox();
             if (box) {
@@ -335,43 +301,28 @@ async function handleTurnstile(page, contextName = '未知') {
             }
         }
         
-        // 5. 等待验证完成（增加等待时间到15秒）
-        console.log(`[${contextName}] 点击完成，等待验证结果（最多15秒）...`);
-        await page.waitForTimeout(5000); // 先等5秒
+        // 等待验证结果
+        await page.waitForTimeout(3000);
         
-        // 检查验证状态（最长再等待10秒）
-        for (let i = 0; i < 20; i++) {
+        // 检查验证状态
+        for (let i = 0; i < 10; i++) {
             try {
-                // 检查 "Success" 文本
                 const success = await turnstileFrame.getByText('Success', { exact: false }).isVisible().catch(() => false);
-                
-                // 检查 checkbox 状态
                 const verified = await turnstileFrame.evaluate(() => {
                     const checkbox = document.querySelector('input[type="checkbox"]');
                     return checkbox ? checkbox.checked : false;
                 }).catch(() => false);
                 
-                // 检查是否出现验证通过的标志
-                const widgetChecked = await turnstileFrame.evaluate(() => {
-                    return document.querySelector('.cf-turnstile-checked') !== null ||
-                           document.querySelector('[data-cf-turnstile-checked]') !== null;
-                }).catch(() => false);
-                
-                if (success || verified || widgetChecked) {
-                    console.log(`[${contextName}] ✅ Turnstile 验证成功（检查 ${i + 1} 次后）`);
+                if (success || verified) {
+                    console.log(`[${contextName}] ✅ Turnstile 验证成功`);
                     return { success: true };
                 }
             } catch (e) {}
-            
-            if (i % 5 === 0 && i > 0) {
-                console.log(`[${contextName}]   ... 验证中 (${i}/20)`);
-            }
-            
             await page.waitForTimeout(500);
         }
         
-        console.log(`[${contextName}] ⚠️ 验证状态未知（可能已通过但未检测到）`);
-        return { success: false, reason: 'timeout', mayBeSuccess: true };
+        console.log(`[${contextName}] ⚠️ Turnstile 状态未知`);
+        return { success: false, reason: 'timeout' };
         
     } catch (e) {
         console.error(`[${contextName}] Turnstile 处理错误:`, e.message);
@@ -379,79 +330,36 @@ async function handleTurnstile(page, contextName = '未知') {
     }
 }
 
-async function getServiceInfo(page) {
-    try {
-        return await page.evaluate(() => {
-            const data = {};
-            const rows = document.querySelectorAll('tr, .info-row, [class*="service"], [class*="detail"]');
-            rows.forEach(row => {
-                const text = row.innerText || '';
-                if (text.includes('Renew period')) {
-                    const match = text.match(/Renew period\s*[:：]?\s*(.+)/i);
-                    if (match) data.renewPeriod = match[1].trim();
-                }
-                if (text.includes('Expiry')) {
-                    const match = text.match(/Expiry\s*[:：]?\s*(.+)/i);
-                    if (match) data.expiry = match[1].trim();
-                }
-                if (text.includes('Auto renew')) {
-                    const match = text.match(/Auto renew\s*[:：]?\s*(.+)/i);
-                    if (match) data.autoRenew = match[1].trim();
-                }
-                if (text.includes('Price') || text.includes('crédits')) {
-                    const match = text.match(/(?:Price|Prix)\s*[:：]?\s*(.+)/i);
-                    if (match) data.price = match[1].trim();
-                }
-            });
-            // 备用：直接查 td
-            if (!data.renewPeriod) {
-                const allTd = document.querySelectorAll('td');
-                allTd.forEach((td, index) => {
-                    const text = td.innerText || '';
-                    if (text.includes('Renew period') && allTd[index + 1]) {
-                        data.renewPeriod = allTd[index + 1].innerText.trim();
-                    }
-                    if (text.includes('Expiry') && allTd[index + 1]) {
-                        data.expiry = allTd[index + 1].innerText.trim();
-                    }
-                    if (text.includes('Auto renew') && allTd[index + 1]) {
-                        data.autoRenew = allTd[index + 1].innerText.trim();
-                    }
-                    if ((text.includes('Price') || text.includes('crédits')) && allTd[index + 1]) {
-                        data.price = allTd[index + 1].innerText.trim();
-                    }
-                });
-            }
-            return data;
-        });
-    } catch (e) {
-        return {};
-    }
-}
-
 (async () => {
     const users = getUsers();
     if (users.length === 0) {
-        console.error('未找到用户');
+        console.error('未找到用户配置');
         process.exit(1);
     }
 
-    if (PROXY_CONFIG && !(await checkProxy())) {
-        console.error('[代理] 无效');
-        process.exit(1);
+    if (PROXY_CONFIG) {
+        const isValid = await checkProxy();
+        if (!isValid) {
+            console.error('[代理] 无效，终止');
+            process.exit(1);
+        }
     }
 
     await launchChrome();
 
+    console.log('连接 Chrome...');
     let browser;
     for (let k = 0; k < 5; k++) {
         try {
             browser = await chromium.connectOverCDP(`http://localhost:${DEBUG_PORT}`);
+            console.log('连接成功');
             break;
         } catch (e) {
+            console.log(`连接尝试 ${k + 1} 失败，重试...`);
             await new Promise(r => setTimeout(r, 2000));
         }
     }
+
     if (!browser) {
         console.error('连接失败');
         process.exit(1);
@@ -469,16 +377,17 @@ async function getServiceInfo(page) {
     }
 
     await page.addInitScript(INJECTED_SCRIPT);
+    console.log('注入脚本已添加');
 
+    // 处理每个用户
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
-        const maskedUser = maskEmail(user.username);
-        
-        console.log(`\n=== 用户 ${i + 1}/${users.length}: ${maskedUser} ===`);
+        const safeUser = getSafeUsername(user.username);
+        console.log(`\n=== 用户 ${i + 1}/${users.length}: ${user.username} ===`);
         
         let status = 'unknown';
         let message = '';
-        let serviceInfo = {};
+        let finalScreenshot = null;
 
         try {
             if (page.isClosed()) {
@@ -486,62 +395,59 @@ async function getServiceInfo(page) {
                 await page.addInitScript(INJECTED_SCRIPT);
             }
 
-            // 登出
+            // 1. 登出（如果已登录）
             await page.goto('https://dashboard.katabump.com/auth/logout');
             await page.waitForTimeout(2000);
 
-            // 进入登录页
+            // 2. 进入登录页
             console.log('导航到登录页...');
             await page.goto('https://dashboard.katabump.com/auth/login');
+            await page.waitForTimeout(2000);
             
-            // 等待页面完全加载（增加等待时间）
-            await page.waitForLoadState('networkidle');
-            await page.waitForTimeout(3000); // 额外等待3秒确保 CF 组件加载
-            
-            // 截图：登录页初始状态 -> Telegram
-            await sendTelegramScreenshot(page, `🔄 ${maskedUser} - 登录页初始`);
+            // 截图：登录页初始状态
+            const loginInitShot = await saveScreenshot(page, `${safeUser}_01_login_init.png`);
+            await sendTelegramMessage(`🔄 开始处理用户: ${user.username}\n步骤: 进入登录页`, loginInitShot);
 
-            // 输入凭据
+            // 3. 输入凭据
+            console.log('输入凭据...');
             const emailInput = page.getByRole('textbox', { name: 'Email' });
             await emailInput.waitFor({ state: 'visible', timeout: 10000 });
             await emailInput.fill(user.username);
+            
             const pwdInput = page.getByRole('textbox', { name: 'Password' });
             await pwdInput.fill(user.password);
             await page.waitForTimeout(500);
 
-            // 截图：填写完表单 -> Telegram
-            await sendTelegramScreenshot(page, `📝 ${maskedUser} - 已填写表单`);
+            // 截图：填写完表单
+            const loginFilledShot = await saveScreenshot(page, `${safeUser}_02_login_filled.png`);
 
-            // 4. 处理登录页 Turnstile（增加等待时间）
-            console.log('开始处理登录页 Turnstile（可能需要较长时间）...');
+            // 4. 处理登录页 Turnstile
             const turnstileResult = await handleTurnstile(page, '登录页');
             
-            // 如果验证不确定，多等一会儿
-            if (!turnstileResult.success && turnstileResult.mayBeSuccess) {
-                console.log('验证状态不确定，额外等待5秒...');
-                await page.waitForTimeout(5000);
-            }
+            // 截图：验证后状态
+            const loginVerifyShot = await saveScreenshot(page, `${safeUser}_03_login_verify.png`);
             
-            // 截图：验证后状态 -> Telegram
-            await sendTelegramScreenshot(page, `🔐 ${maskedUser} - Turnstile验证后 (${turnstileResult.success ? '成功' : turnstileResult.mayBeSuccess ? '可能成功' : '失败'})`);
+            if (!turnstileResult.success) {
+                await sendTelegramMessage(
+                    `⚠️ 用户: ${user.username}\n登录页 Turnstile 可能未通过\n原因: ${turnstileResult.reason}`, 
+                    loginVerifyShot
+                );
+                // 继续尝试，因为有时验证是自动的
+            }
 
-            // 点击登录
+            // 5. 点击登录
             console.log('点击 Login...');
             await page.getByRole('button', { name: 'Login', exact: true }).click();
             
-            // 等待导航完成（增加超时时间）
-            try {
-                await page.waitForLoadState('networkidle', { timeout: 30000 });
-            } catch (e) {
-                console.log('等待 networkidle 超时，继续执行...');
-            }
+            // 等待跳转
             await page.waitForTimeout(4000);
             
-            // 截图：登录后状态 -> Telegram
-            await sendTelegramScreenshot(page, `🔑 ${maskedUser} - 登录后 (URL: ${page.url().split('?')[0]})`);
+            // 截图：登录后状态
+            const afterLoginShot = await saveScreenshot(page, `${safeUser}_04_after_login.png`);
 
-            // 检查登录结果
+            // 6. 检查登录结果
             if (page.url().includes('login')) {
+                // 登录失败
                 let failReason = '未知错误';
                 try {
                     const errorLoc = page.getByText(/incorrect|invalid|error/i).first();
@@ -552,36 +458,53 @@ async function getServiceInfo(page) {
                 
                 console.error(`❌ 登录失败: ${failReason}`);
                 status = 'login_failed';
-                message = `❌ *登录失败*\n用户: ${maskedUser}\n原因: ${failReason}`;
+                message = `❌ *登录失败*\n用户: ${user.username}\n原因: ${failReason}`;
+                finalScreenshot = afterLoginShot;
                 
-                await sendTelegramMessage(message);
+                await sendTelegramMessage(message, finalScreenshot);
                 continue;
             }
 
-            console.log('✅ 登录成功');
-            serviceInfo = await getServiceInfo(page);
+            console.log('✅ 登录成功，当前 URL:', page.url());
+            await sendTelegramMessage(`✅ 用户 ${user.username} 登录成功\nURL: ${page.url()}`, afterLoginShot);
 
-            // 寻找 "See" 链接
+            // 7. 寻找 "See" 链接
             console.log('寻找 See 链接...');
             let seeFound = false;
+            
             try {
                 await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 10000 });
                 await page.getByRole('link', { name: 'See' }).first().click();
                 seeFound = true;
+                console.log('✅ 找到并点击 See');
             } catch (e) {
                 console.log('❌ 未找到 See 链接');
-                await sendTelegramScreenshot(page, `❌ ${maskedUser} - 未找到See链接`);
+                
+                // 截图查看页面结构
+                const dashboardShot = await saveScreenshot(page, `${safeUser}_05_dashboard_no_see.png`);
+                
+                // 列出所有链接帮助调试
+                const links = await page.getByRole('link').all();
+                let linkTexts = [];
+                for (const link of links.slice(0, 10)) {
+                    try {
+                        const text = await link.innerText();
+                        if (text) linkTexts.push(text.trim());
+                    } catch (e) {}
+                }
                 
                 status = 'no_see_link';
-                message = `❌ *未找到 See 链接*\n用户: ${maskedUser}`;
-                await sendTelegramMessage(message);
+                message = `❌ *未找到 See 链接*\n用户: ${user.username}\n页面链接: ${linkTexts.join(', ') || '无'}`;
+                finalScreenshot = dashboardShot;
+                
+                await sendTelegramMessage(message, finalScreenshot);
                 continue;
             }
 
             await page.waitForTimeout(2000);
-            await sendTelegramScreenshot(page, `👁️ ${maskedUser} - 点击See后`);
+            const afterSeeShot = await saveScreenshot(page, `${safeUser}_06_after_see_click.png`);
 
-            // Renew 流程
+            // 8. Renew 流程
             console.log('开始 Renew 流程...');
             let renewSuccess = false;
             let hasCaptchaError = false;
@@ -591,49 +514,59 @@ async function getServiceInfo(page) {
                 console.log(`\n[Renew 尝试 ${attempt}/20]`);
                 
                 const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
+                
                 try {
                     await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
                 } catch (e) {
+                    console.log('未找到 Renew 按钮');
                     break;
                 }
 
-                if (!await renewBtn.isVisible()) break;
+                if (!await renewBtn.isVisible()) {
+                    console.log('Renew 按钮不可见');
+                    break;
+                }
 
                 await renewBtn.click();
-                console.log('已点击 Renew');
+                console.log('已点击 Renew，等待模态框...');
                 
                 const modal = page.locator('#renew-modal');
                 try {
                     await modal.waitFor({ state: 'visible', timeout: 5000 });
                 } catch (e) {
+                    console.log('模态框未出现');
                     continue;
                 }
 
-                // 鼠标移动
+                // 鼠标移动模拟
                 try {
                     const box = await modal.boundingBox();
                     if (box) await page.mouse.move(box.x + box.width/2, box.y + box.height/2, { steps: 5 });
                 } catch (e) {}
 
-                // 处理模态框 Turnstile（同样增加等待）
+                // 处理 Turnstile
                 console.log('处理模态框 Turnstile...');
                 const modalTurnstile = await handleTurnstile(page, `Renew-${attempt}`);
                 
-                if (!modalTurnstile.success && modalTurnstile.mayBeSuccess) {
-                    console.log('模态框验证状态不确定，额外等待3秒...');
-                    await page.waitForTimeout(3000);
-                }
-                
-                await sendTelegramScreenshot(page, `🔄 ${maskedUser} - Renew尝试${attempt}`);
+                // 截图：点击 Renew 后，验证前
+                const renewModalShot = await saveScreenshot(page, `${safeUser}_07_renew_modal_${attempt}.png`);
 
+                if (!modalTurnstile.success) {
+                    console.log('Turnstile 可能未就绪，继续...');
+                }
+
+                // 点击确认 Renew
                 const confirmBtn = modal.getByRole('button', { name: 'Renew' });
                 if (!await confirmBtn.isVisible()) {
+                    console.log('未找到确认按钮');
                     await page.reload();
                     await page.waitForTimeout(3000);
                     continue;
                 }
 
                 await confirmBtn.click();
+                console.log('已点击确认 Renew');
+                
                 await page.waitForTimeout(2000);
 
                 // 检查结果
@@ -642,14 +575,17 @@ async function getServiceInfo(page) {
                 isNotTimeYet = false;
 
                 while (Date.now() - startCheck < 5000) {
+                    // 检查验证码错误
                     try {
                         const captchaError = page.getByText('Please complete the captcha to continue');
                         if (await captchaError.isVisible({ timeout: 500 })) {
+                            console.log('⚠️ 检测到验证码错误');
                             hasCaptchaError = true;
                             break;
                         }
                     } catch (e) {}
-                    
+
+                    // 检查时间限制
                     try {
                         const timeError = page.getByText("You can't renew your server yet");
                         if (await timeError.isVisible({ timeout: 500 })) {
@@ -661,64 +597,67 @@ async function getServiceInfo(page) {
                             break;
                         }
                     } catch (e) {}
-                    
+
+                    // 检查成功
                     try {
                         if (!await modal.isVisible({ timeout: 500 })) {
+                            console.log('✅ 模态框关闭，可能成功');
                             break;
                         }
                     } catch (e) {
+                        console.log('✅ 模态框已关闭');
                         break;
                     }
+
                     await page.waitForTimeout(300);
                 }
 
-                await sendTelegramScreenshot(page, `📊 ${maskedUser} - 结果${attempt} (Captcha:${hasCaptchaError}, NotTime:${isNotTimeYet})`);
+                // 截图：操作结果
+                const resultShot = await saveScreenshot(page, `${safeUser}_08_renew_result_${attempt}.png`);
 
                 if (isNotTimeYet) {
                     status = 'not_time';
-                    message = `⏳ *暂无法续期*\n用户: ${maskedUser}\n原因: 未到续期时间`;
-                    renewSuccess = true;
+                    message = `⏳ *暂无法续期*\n用户: ${user.username}\n原因: 未到续期时间`;
+                    finalScreenshot = resultShot;
+                    renewSuccess = true; // 标记完成，不再重试
                     
+                    // 关闭模态框
                     try {
                         await modal.getByLabel('Close').click();
                     } catch (e) {}
                     
-                    await sendTelegramMessage(message);
+                    await sendTelegramMessage(message, finalScreenshot);
                     break;
                 }
 
                 if (hasCaptchaError) {
                     console.log('验证码错误，刷新重试...');
+                    await sendTelegramMessage(
+                        `⚠️ 用户 ${user.username} 第 ${attempt} 次尝试\n验证码未通过，准备刷新重试`, 
+                        resultShot
+                    );
                     await page.reload();
                     await page.waitForTimeout(3000);
                     continue;
                 }
 
+                // 检查是否真的成功
                 await page.waitForTimeout(2000);
                 if (!await modal.isVisible().catch(() => false)) {
                     console.log('✅ Renew 成功！');
                     status = 'success';
-                    
-                    await page.waitForTimeout(1000);
-                    const newServiceInfo = await getServiceInfo(page);
-                    const info = newServiceInfo.expiry ? newServiceInfo : serviceInfo;
-                    
-                    message = `✅ *续期成功*\n` +
-                              `用户: ${maskedUser}\n` +
-                              `━━━━━━━━━━━━━━\n` +
-                              `*服务信息*\n` +
-                              `📅 续期周期: ${info.renewPeriod || 'Every 4 days'}\n` +
-                              `⏰ 到期时间: ${info.expiry || 'Unknown'}\n` +
-                              `🔄 自动续期: ${info.autoRenew || 'Non'}\n` +
-                              `💰 价格: ${info.price || '0 crédits'}`;
-                    
+                    message = `✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期`;
+                    finalScreenshot = resultShot;
                     renewSuccess = true;
                     
-                    await sendTelegramScreenshot(page, `✅ ${maskedUser} - 续期成功`);
-                    await sendTelegramMessage(message);
+                    await sendTelegramMessage(message, finalScreenshot);
                     break;
                 } else {
-                    console.log('模态框仍在，重试...');
+                    console.log('模态框仍在，可能失败，准备重试...');
+                    await sendTelegramMessage(
+                        `⚠️ 用户 ${user.username} 第 ${attempt} 次尝试\n模态框未关闭，准备重试`, 
+                        resultShot
+                    );
                     await page.reload();
                     await page.waitForTimeout(3000);
                 }
@@ -726,28 +665,39 @@ async function getServiceInfo(page) {
 
             if (!renewSuccess && !isNotTimeYet) {
                 status = 'renew_failed';
-                message = `❌ *续期失败*\n用户: ${maskedUser}\n原因: 20次尝试后仍未成功`;
-                await sendTelegramScreenshot(page, `❌ ${maskedUser} - 最终失败`);
-                await sendTelegramMessage(message);
+                message = `❌ *续期失败*\n用户: ${user.username}\n原因: 20次尝试后仍未成功`;
+                finalScreenshot = await saveScreenshot(page, `${safeUser}_09_final_failed.png`);
+                await sendTelegramMessage(message, finalScreenshot);
             }
 
         } catch (err) {
-            console.error(`错误:`, err);
+            console.error(`处理用户时出错:`, err);
             status = 'error';
-            message = `❌ *处理出错*\n用户: ${maskedUser}\n错误: ${err.message}`;
+            message = `❌ *处理出错*\n用户: ${user.username}\n错误: ${err.message}`;
             
             try {
-                await sendTelegramScreenshot(page, `💥 ${maskedUser} - 异常`);
+                finalScreenshot = await saveScreenshot(page, `${safeUser}_error.png`);
             } catch (e) {}
             
-            await sendTelegramMessage(message);
+            await sendTelegramMessage(message, finalScreenshot);
+        }
+
+        // 最终截图
+        try {
+            const finalShot = await saveScreenshot(page, `${safeUser}_final_${status}.png`);
+            console.log(`用户 ${user.username} 处理完成，状态: ${status}`);
+        } catch (e) {
+            console.log('最终截图失败');
         }
         
-        console.log(`用户 ${maskedUser} 处理完成，状态: ${status}`);
         console.log('---');
     }
 
     console.log('\n所有用户处理完成');
-    try { await browser.close(); } catch (e) {}
+    
+    try {
+        await browser.close();
+    } catch (e) {}
+    
     process.exit(0);
 })();
