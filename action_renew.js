@@ -6,8 +6,9 @@ const path = require('path');
 const { spawn, exec } = require('child_process');
 const http = require('http');
 
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
-const TG_CHAT_ID = process.env.TG_CHAT_ID;
+// 企业微信机器人配置 - 只需要 key，前缀固定
+const WECHAT_KEY = process.env.WECHAT_KEY;
+const WECHAT_WEBHOOK_BASE = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send';
 
 // 截图目录（仅用于调试，不发送）
 const SCREENSHOT_DIR = path.join(process.cwd(), 'screenshots');
@@ -42,33 +43,72 @@ async function saveScreenshot(page, filename) {
     }
 }
 
-// 发送 Telegram 纯文字消息（无 Markdown，避免 400 错误）
-async function sendTelegramMessage(text) {
-    if (!TG_BOT_TOKEN || !TG_CHAT_ID) {
-        console.log('[Telegram] 未配置，跳过发送');
+// 发送企业微信机器人消息（文本类型）
+async function sendWechatMessage(text) {
+    if (!WECHAT_KEY) {
+        console.log('[企业微信] 未配置 WECHAT_KEY，跳过发送');
         return;
     }
 
     try {
-        const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-        await axios.post(url, {
-            chat_id: TG_CHAT_ID,
-            text: text,
-            // 不使用 Markdown，避免格式错误
-            parse_mode: undefined
+        const url = `${WECHAT_WEBHOOK_BASE}?key=${WECHAT_KEY}`;
+        const payload = {
+            msgtype: 'text',
+            text: {
+                content: text
+            }
+        };
+
+        const response = await axios.post(url, payload, {
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            timeout: 10000
         });
-        console.log('[Telegram] 消息已发送');
-    } catch (e) {
-        console.error('[Telegram] 发送失败:', e.message);
-        // 如果失败，尝试不带任何格式再发一次
-        try {
-            await axios.post(url, {
-                chat_id: TG_CHAT_ID,
-                text: String(text).substring(0, 4000) // 限制长度
-            });
-        } catch (e2) {
-            console.error('[Telegram] 重试也失败:', e2.message);
+
+        if (response.data && response.data.errcode === 0) {
+            console.log('[企业微信] 消息已发送');
+        } else {
+            console.error('[企业微信] 发送失败:', response.data.errmsg || '未知错误');
         }
+    } catch (e) {
+        console.error('[企业微信] 发送失败:', e.message);
+        if (e.response) {
+            console.error('[企业微信] 响应:', e.response.data);
+        }
+    }
+}
+
+// 发送企业微信 Markdown 消息（如果需要更丰富的格式）
+async function sendWechatMarkdown(markdownContent) {
+    if (!WECHAT_KEY) {
+        console.log('[企业微信] 未配置 WECHAT_KEY，跳过发送');
+        return;
+    }
+
+    try {
+        const url = `${WECHAT_WEBHOOK_BASE}?key=${WECHAT_KEY}`;
+        const payload = {
+            msgtype: 'markdown',
+            markdown: {
+                content: markdownContent
+            }
+        };
+
+        const response = await axios.post(url, payload, {
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            timeout: 10000
+        });
+
+        if (response.data && response.data.errcode === 0) {
+            console.log('[企业微信] Markdown 消息已发送');
+        } else {
+            console.error('[企业微信] 发送失败:', response.data.errmsg || '未知错误');
+        }
+    } catch (e) {
+        console.error('[企业微信] 发送失败:', e.message);
     }
 }
 
@@ -494,7 +534,7 @@ async function handleTurnstile(page, contextName = '未知') {
                 
                 finalMessage = `❌ 登录失败\n用户: ${maskedUser}\n原因: ${failReason}`;
                 console.log(finalMessage);
-                await sendTelegramMessage(finalMessage);
+                await sendWechatMessage(finalMessage);
                 continue;
             }
 
@@ -509,7 +549,7 @@ async function handleTurnstile(page, contextName = '未知') {
                 console.log('未找到 See 链接');
                 serviceInfo = await getServiceInfo(page);
                 finalMessage = `❌ 未找到 See 链接\n用户: ${maskedUser}\n\n${formatServiceInfo(serviceInfo)}`;
-                await sendTelegramMessage(finalMessage);
+                await sendWechatMessage(finalMessage);
                 continue;
             }
 
@@ -609,7 +649,7 @@ async function handleTurnstile(page, contextName = '未知') {
                     // 未到时间，发送当前服务信息
                     finalMessage = `⏳ 暂无法续期\n用户: ${maskedUser}\n原因: 未到续期时间\n\n${formatServiceInfo(serviceInfo)}`;
                     console.log(finalMessage);
-                    await sendTelegramMessage(finalMessage);
+                    await sendWechatMessage(finalMessage);
                     
                     try {
                         await modal.getByLabel('Close').click();
@@ -629,7 +669,7 @@ async function handleTurnstile(page, contextName = '未知') {
                     
                     finalMessage = `✅ 续期成功\n用户: ${maskedUser}\n\n续期后服务信息:\n续期周期: ${finalInfo.renewPeriod || 'N/A'}\n到期时间: ${finalInfo.expiry || 'N/A'}\n自动续期: ${finalInfo.autoRenew || 'N/A'}\n价格: ${finalInfo.price || 'N/A'}`;
                     console.log(finalMessage);
-                    await sendTelegramMessage(finalMessage);
+                    await sendWechatMessage(finalMessage);
                     break;
                 }
 
@@ -644,13 +684,13 @@ async function handleTurnstile(page, contextName = '未知') {
                 const latestInfo = await getServiceInfo(page);
                 finalMessage = `❌ 续期失败\n用户: ${maskedUser}\n原因: 20次尝试后仍未成功\n\n${formatServiceInfo(latestInfo)}`;
                 console.log(finalMessage);
-                await sendTelegramMessage(finalMessage);
+                await sendWechatMessage(finalMessage);
             }
 
         } catch (err) {
             console.error(`处理出错:`, err);
             finalMessage = `❌ 处理出错\n用户: ${maskedUser}\n错误: ${err.message}`;
-            await sendTelegramMessage(finalMessage);
+            await sendWechatMessage(finalMessage);
         }
         
         console.log(`用户 ${maskedUser} 处理完成`);
