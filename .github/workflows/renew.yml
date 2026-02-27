@@ -31,8 +31,11 @@ jobs:
         # 格式: [{"username": "xxx", "password": "xxx"}, ...]
         USERS_JSON: ${{ secrets.USERS_JSON }}
         HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        # 企业微信机器人配置（二选一）
+        WECHAT_KEY: ${{ secrets.WECHAT_KEY }}
+        # 或者继续使用 Telegram（二选一）
+        # TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        # TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       # 使用 xvfb-run 模拟有头环境运行
       run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
 
