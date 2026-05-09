@@ -552,6 +552,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
 
 /**
  * 抓取页面中的 Service information 信息
+ * 返回对象和格式化文本
  */
 async function getServiceInfo(page) {
     try {
@@ -578,24 +579,78 @@ async function getServiceInfo(page) {
             return result;
         });
         
+        // 格式化为文本
         let text = '';
         if (info.renewPeriod) text += `Renew period: ${info.renewPeriod}\n`;
         if (info.expiry) text += `Expiry: ${info.expiry}\n`;
         if (info.autoRenew) text += `Auto renew: ${info.autoRenew}\n`;
         if (info.price) text += `Price: ${info.price}\n`;
         
-        return text || 'Service information: 未获取到';
+        return {
+            raw: info,
+            text: text || 'Service information: 未获取到'
+        };
     } catch (e) {
         console.log('获取 Service information 失败:', e.message);
-        return 'Service information: 获取失败';
+        return {
+            raw: {},
+            text: 'Service information: 获取失败'
+        };
     }
 }
 
 /**
  * 格式化消息，添加抬头和 Service information
  */
-function formatMessage(baseText, serviceInfo) {
-    return `[katabump-renew]\n${baseText}\n\n[Service information]\n${serviceInfo}`;
+function formatMessage(baseText, serviceInfoText) {
+    return `[katabump-renew]\n${baseText}\n\n[Service information]\n${serviceInfoText}`;
+}
+
+// ==================== 日期判断工具 ====================
+
+/**
+ * 判断是否需要续期
+ * 只有当今天是 Expiry 日期的前一天时才返回 true
+ * @param {string} expiryStr - 如 "2026-05-12"
+ * @returns {object} { shouldRenew: boolean, daysUntilExpiry: number, message: string }
+ */
+function checkRenewDate(expiryStr) {
+    if (!expiryStr) {
+        return { shouldRenew: false, daysUntilExpiry: -1, message: '未获取到 Expiry 日期' };
+    }
+    
+    try {
+        // 解析 Expiry 日期（支持多种格式）
+        const expiryDate = new Date(expiryStr);
+        if (isNaN(expiryDate.getTime())) {
+            return { shouldRenew: false, daysUntilExpiry: -1, message: `无法解析日期: ${expiryStr}` };
+        }
+        
+        // 获取当前日期（去掉时间部分，只比较日期）
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        const expiry = new Date(expiryDate.getFullYear(), expiryDate.getMonth(), expiryDate.getDate());
+        
+        // 计算相差天数
+        const diffTime = expiry.getTime() - today.getTime();
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+        
+        console.log(`[DateCheck] 今天: ${today.toISOString().split('T')[0]}, Expiry: ${expiry.toISOString().split('T')[0]}, 相差: ${diffDays} 天`);
+        
+        // 只有相差1天（即前一天）才续期
+        if (diffDays === 1) {
+            return { shouldRenew: true, daysUntilExpiry: diffDays, message: '今天是续期前一天，执行续期' };
+        } else if (diffDays > 1) {
+            return { shouldRenew: false, daysUntilExpiry: diffDays, message: `还有 ${diffDays} 天才到期，无需续期` };
+        } else if (diffDays === 0) {
+            return { shouldRenew: true, daysUntilExpiry: diffDays, message: '今天就是到期日，紧急续期！' };
+        } else {
+            return { shouldRenew: false, daysUntilExpiry: diffDays, message: `已过期 ${Math.abs(diffDays)} 天，请手动检查` };
+        }
+    } catch (e) {
+        console.error('日期判断出错:', e.message);
+        return { shouldRenew: false, daysUntilExpiry: -1, message: `日期判断出错: ${e.message}` };
+    }
 }
 
 // ==================== 主程序 ====================
@@ -766,7 +821,7 @@ function formatMessage(baseText, serviceInfo) {
                         const serviceInfo = await getServiceInfo(page);
                         const msg = formatMessage(
                             `❌ 登录失败\n账号: ${maskedUser}\n原因: 账号或密码错误`,
-                            serviceInfo
+                            serviceInfo.text
                         );
                         await sendWecomMessage(msg, failShot);
 
@@ -797,6 +852,33 @@ function formatMessage(baseText, serviceInfo) {
             await page.waitForTimeout(2000);
             await screenshotAndNotify(page, `step4_server_detail.png`,
                 `[katabump-renew] 进入服务器详情\n账号: ${maskedUser}`);
+
+            // ==================== 获取 Service information 并判断是否需要续期 ====================
+            
+            const serviceInfo = await getServiceInfo(page);
+            console.log(`[ServiceInfo] 获取到的信息:\n${serviceInfo.text}`);
+            
+            // 日期判断
+            const dateCheck = checkRenewDate(serviceInfo.raw.expiry);
+            console.log(`[DateCheck] ${dateCheck.message}`);
+            
+            // 无论是否需要续期，都发送当前状态通知
+            const statusShot = await screenshotAndNotify(page, `server_status.png`,
+                `[katabump-renew] 服务器状态\n账号: ${maskedUser}`);
+            
+            // 如果不是续期前一天，发送状态通知并跳过 Renew
+            if (!dateCheck.shouldRenew) {
+                const msg = formatMessage(
+                    `📊 服务器状态报告\n账号: ${maskedUser}\n${dateCheck.message}\n\n当前状态无需续期`,
+                    serviceInfo.text
+                );
+                await sendWecomMessage(msg, statusShot);
+                console.log(`   >> ⏭️ 跳过 Renew，${dateCheck.message}`);
+                continue;
+            }
+            
+            // 是续期前一天（或当天），执行 Renew
+            console.log(`   >> 🔄 ${dateCheck.message}，开始执行 Renew...`);
 
             // --- Renew 逻辑 ---
             let renewSuccess = false;
@@ -912,10 +994,9 @@ function formatMessage(baseText, serviceInfo) {
                                     const skipShot = await screenshotAndNotify(page, `skip.png`,
                                         `[katabump-renew] 暂无法续期\n账号: ${maskedUser}\n原因: 还没到时间`);
 
-                                    const serviceInfo = await getServiceInfo(page);
                                     const msg = formatMessage(
                                         `⏳ 暂无法续期 (跳过)\n账号: ${maskedUser}\n原因: 还没到时间\n下次可用: ${dateStr}`,
-                                        serviceInfo
+                                        serviceInfo.text
                                     );
                                     await sendWecomMessage(msg, skipShot);
 
@@ -947,10 +1028,9 @@ function formatMessage(baseText, serviceInfo) {
                             const successShot = await screenshotAndNotify(page, `success.png`,
                                 `[katabump-renew] 续期成功\n账号: ${maskedUser}\n状态: 服务器已成功续期！`);
 
-                            const serviceInfo = await getServiceInfo(page);
                             const msg = formatMessage(
                                 `✅ 续期成功\n账号: ${maskedUser}\n状态: 服务器已成功续期！`,
-                                serviceInfo
+                                serviceInfo.text
                             );
                             await sendWecomMessage(msg, successShot);
                             renewSuccess = true;
@@ -979,10 +1059,9 @@ function formatMessage(baseText, serviceInfo) {
                 const failShot = await screenshotAndNotify(page, `final_fail.png`,
                     `[katabump-renew] 续期最终失败\n账号: ${maskedUser}\n原因: 超过最大重试次数 (20次)`);
                 
-                const serviceInfo = await getServiceInfo(page);
                 const msg = formatMessage(
                     `❌ 续期失败\n账号: ${maskedUser}\n原因: 超过最大重试次数，请手动检查`,
-                    serviceInfo
+                    serviceInfo.text
                 );
                 await sendWecomMessage(msg, failShot);
             }
@@ -996,7 +1075,7 @@ function formatMessage(baseText, serviceInfo) {
             const serviceInfo = await getServiceInfo(page);
             const msg = formatMessage(
                 `💥 处理异常\n账号: ${maskedUser}\n错误: ${err.message}`,
-                serviceInfo
+                serviceInfo.text
             );
             await sendWecomMessage(msg, errorShot);
         }
