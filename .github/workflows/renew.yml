@@ -1,69 +1,100 @@
-name: Katabump Auto Renew
+name: Katabump 自动续期机器人
 
 on:
+  # 定时触发：每天 UTC 0点（北京时间 8点）自动运行
   schedule:
-  # 每天 UTC 0点 (北京时间 8点) 运行
-  - cron: '0 0 * * *'
-  workflow_dispatch: # 允许手动触发
+    - cron: '0 0 * * *'
+  
+  # 手动触发：支持在 Actions 页面手动点击运行
+  workflow_dispatch:
 
 jobs:
+  # ==================== 续期任务 ====================
   renew:
+    name: 执行服务器续期
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+      # ---------- 步骤 1：检出代码 ----------
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
+      # ---------- 步骤 2：设置运行环境 ----------
+      - name: 配置 Node.js 环境
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-    - name: Start Proxy (sing-box)
-      env:
-        PROXY_URL: ${{ secrets.PROXY_URL }}
-      run: |
-        if [ -z "$PROXY_URL" ]; then
-          echo "PROXY_URL not set, skipping sing-box setup."
-          exit 0
-        fi
-        SINGBOX_VER="1.11.0"
-        echo "Downloading sing-box v${SINGBOX_VER}..."
-        wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-        tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-        mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
-        chmod +x ./sing-box
-        echo "Generating sing-box config from PROXY_URL..."
-        python proxy_handler.py
-        echo "Starting sing-box..."
-        nohup ./sing-box run -c config.json > singbox.log 2>&1 &
-        sleep 3
-        echo "sing-box started. PROXY_URL will be passed to action_renew.js."
+      # ---------- 步骤 3：启动代理（可选）----------
+      - name: 启动 sing-box 代理
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          if [ -z "$PROXY_URL" ]; then
+            echo "⚠️ PROXY_URL 未设置，跳过 sing-box 代理配置"
+            exit 0
+          fi
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb
-        npm install
-        npx playwright install-deps chrome
+          SINGBOX_VER="1.11.0"
+          echo "📥 正在下载 sing-box v${SINGBOX_VER}..."
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+          
+          echo "📦 解压 sing-box..."
+          tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
+          mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
+          chmod +x ./sing-box
+          
+          echo "⚙️ 正在通过 proxy_handler.py 生成 sing-box 配置..."
+          python proxy_handler.py
+          
+          echo "🚀 启动 sing-box 代理..."
+          nohup ./sing-box run -c config.json > singbox.log 2>&1 &
+          sleep 3
+          
+          echo "✅ sing-box 代理已启动，配置将通过 PROXY_URL 传递给续期脚本"
 
-    - name: Run Renew Script
-      env:
-        USERS_JSON: ${{ secrets.USERS_JSON }}
-        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-        PROXY_URL: ${{ secrets.PROXY_URL }}
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        GITHUB_EVENT_NAME: ${{ github.event_name }}
-      run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+      # ---------- 步骤 4：安装依赖 ----------
+      - name: 安装系统与项目依赖
+        run: |
+          echo "🔄 更新系统软件包..."
+          sudo apt-get update
+          
+          echo "📥 安装 xvfb 虚拟显示..."
+          sudo apt-get install -y xvfb
+          
+          echo "📦 安装 Node.js 依赖..."
+          npm install
+          
+          echo "🎭 安装 Playwright Chromium 浏览器..."
+          npx playwright install chromium
+          
+          echo "🔧 安装 Chromium 系统依赖..."
+          npx playwright install-deps chrome
 
-    - name: Upload Screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: screenshots
-        path: screenshots/
+      # ---------- 步骤 5：运行续期脚本 ----------
+      - name: 执行自动续期脚本
+        env:
+          USERS_JSON: ${{ secrets.USERS_JSON }}
+          HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          WECOM_BOT_KEY: ${{ secrets.WECOM_BOT_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: |
+          echo "🤖 启动 Katabump 自动续期..."
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+
+      # ---------- 步骤 6：上传截图（已禁用）----------
+      # 截图已直接发送到企业微信机器人，无需上传至 GitHub
+      # 如需恢复上传，请取消下方注释：
+      #
+      # - name: 上传截图到 GitHub
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: screenshots
+      #     path: screenshots/
