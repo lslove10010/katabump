@@ -7,93 +7,67 @@ const crypto = require('crypto');
 const { spawn, exec } = require('child_process');
 const http = require('http');
 
-// ==================== 企业微信机器人配置 ====================
 const WECOM_BOT_KEY = process.env.WECOM_BOT_KEY;
-// 企业微信机器人 Webhook 基础地址
-const WECOM_WEBHOOK_BASE = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send';
-
 const GITHUB_EVENT_NAME = process.env.GITHUB_EVENT_NAME || '';
 
 // Anti-detection: scheduled runs get 0-3h random delay; manual runs skip delay
 const SINGBOX_LOCAL_PROXY = 'http://127.0.0.1:8080';
 
-// ==================== 企业微信消息发送函数 ====================
+// ==================== 企业微信机器人配置 ====================
+const WECOM_WEBHOOK_BASE = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send';
 
 /**
- * 发送企业微信文本/Markdown 消息
- * @param {string} content - Markdown 格式的消息内容
+ * 发送企业微信纯文本消息
  */
 async function sendWecomText(content) {
     if (!WECOM_BOT_KEY) {
         console.log('[WeCom] WECOM_BOT_KEY not set, skipping message.');
         return;
     }
-
     try {
         const url = `${WECOM_WEBHOOK_BASE}?key=${WECOM_BOT_KEY}`;
         await axios.post(url, {
-            msgtype: 'markdown',
-            markdown: {
-                content: content
-            }
+            msgtype: 'text',
+            text: { content: content }
         }, {
             headers: { 'Content-Type': 'application/json' },
             timeout: 10000
         });
-        console.log('[WeCom] Markdown message sent.');
+        console.log('[WeCom] Text message sent.');
     } catch (e) {
-        console.error('[WeCom] Failed to send markdown message:', e.message);
+        console.error('[WeCom] Failed to send text message:', e.message);
     }
 }
 
 /**
  * 发送企业微信图片消息（Base64 + MD5）
- * 图片会在个人微信中正常显示
- * @param {string} imagePath - 本地图片路径
- * @param {string} caption - 可选的说明文字（会单独发一条 markdown）
  */
-async function sendWecomImage(imagePath, caption = '') {
+async function sendWecomImage(imagePath) {
     if (!WECOM_BOT_KEY) {
         console.log('[WeCom] WECOM_BOT_KEY not set, skipping image.');
         return;
     }
-
     if (!fs.existsSync(imagePath)) {
         console.log(`[WeCom] Image not found: ${imagePath}`);
         return;
     }
-
     try {
-        // 1. 读取图片并计算 base64 和 md5（base64 编码前的原始内容）
         const imgBuffer = fs.readFileSync(imagePath);
-        
-        // 检查大小：base64 编码前不能超过 2MB
         if (imgBuffer.length > 2 * 1024 * 1024) {
             console.log(`[WeCom] Image too large (${(imgBuffer.length / 1024 / 1024).toFixed(2)}MB > 2MB), skipping.`);
             return;
         }
-
         const base64 = imgBuffer.toString('base64');
         const md5 = crypto.createHash('md5').update(imgBuffer).digest('hex');
-
-        // 2. 发送图片消息
         const url = `${WECOM_WEBHOOK_BASE}?key=${WECOM_BOT_KEY}`;
         await axios.post(url, {
             msgtype: 'image',
-            image: {
-                base64: base64,
-                md5: md5
-            }
+            image: { base64: base64, md5: md5 }
         }, {
             headers: { 'Content-Type': 'application/json' },
             timeout: 30000
         });
         console.log(`[WeCom] Image sent: ${path.basename(imagePath)}`);
-
-        // 3. 如果有说明文字，单独发一条 markdown
-        if (caption) {
-            await sendWecomText(caption);
-        }
     } catch (e) {
         console.error('[WeCom] Failed to send image:', e.message);
     }
@@ -101,39 +75,37 @@ async function sendWecomImage(imagePath, caption = '') {
 
 /**
  * 组合发送：先发文字，再发图片
- * @param {string} text - Markdown 文字
- * @param {string} imagePath - 图片路径
  */
 async function sendWecomMessage(text, imagePath = null) {
-    // 先发文字
     await sendWecomText(text);
-    // 再发图片（如果有）
     if (imagePath) {
         await sendWecomImage(imagePath);
     }
 }
 
-// ==================== 截图辅助函数 ====================
+// ==================== 截图辅助函数（不保存到 GitHub，只发送到微信） ====================
 
 /**
- * 截图并立即发送到企业微信
- * @param {object} page - Playwright page 对象
- * @param {string} filename - 截图文件名（不含路径）
- * @param {string} caption - 企业微信图片说明（可选）
- * @returns {string} 截图完整路径
+ * 截图并直接发送到企业微信，保存到临时目录（运行结束后自动清理）
  */
 async function screenshotAndNotify(page, filename, caption = '') {
-    const photoDir = path.join(process.cwd(), 'screenshots');
-    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+    const tmpDir = path.join(process.cwd(), 'tmp_screenshots');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
     
-    const screenshotPath = path.join(photoDir, filename);
+    const screenshotPath = path.join(tmpDir, filename);
     try {
         await page.screenshot({ path: screenshotPath, fullPage: true });
-        console.log(`[Screenshot] Saved: ${filename}`);
+        console.log(`[Screenshot] Captured: ${filename}`);
         
-        if (WECOM_BOT_KEY) {
-            await sendWecomImage(screenshotPath, caption);
+        if (WECOM_BOT_KEY && caption) {
+            await sendWecomText(caption);
         }
+        if (WECOM_BOT_KEY) {
+            await sendWecomImage(screenshotPath);
+        }
+        
+        // 发送后立即删除，不保留在 GitHub
+        fs.unlinkSync(screenshotPath);
         return screenshotPath;
     } catch (e) {
         console.log('[Screenshot] Failed:', e.message);
@@ -141,84 +113,85 @@ async function screenshotAndNotify(page, filename, caption = '') {
     }
 }
 
+// ==================== 账号脱敏工具 ====================
+
+/**
+ * 脱敏邮箱：user@example.com → u***@example.com
+ */
+function maskEmail(email) {
+    if (!email || !email.includes('@')) return '***';
+    const [local, domain] = email.split('@');
+    if (local.length <= 1) return `*@${domain}`;
+    return `${local[0]}***@${domain}`;
+}
+
 // 启用 stealth 插件
 chromium.use(stealth);
 
-// GitHub Actions 环境下的 Chrome 路径 (通常是 google-chrome)
+// GitHub Actions 环境下的 Chrome 路径
 const CHROME_PATH = process.env.CHROME_PATH || '/usr/bin/google-chrome';
 const DEBUG_PORT = 9222;
 
 process.env.NO_PROXY = 'localhost,127.0.0.1';
 
 // --- Proxy Configuration ---
-// Priority: PROXY_URL (sing-box local) > HTTP_PROXY (direct HTTP)
 const PROXY_URL = process.env.PROXY_URL;
 const HTTP_PROXY = process.env.HTTP_PROXY;
 let PROXY_CONFIG = null;
 
 async function detectSingboxProxy() {
-  if (!PROXY_URL) return false;
-  try {
-    await axios.get('http://127.0.0.1:8080', { timeout: 2000, proxy: false });
-    return true;
-  } catch (e) {
-    return e.code !== 'ECONNREFUSED';
-  }
+    if (!PROXY_URL) return false;
+    try {
+        await axios.get('http://127.0.0.1:8080', { timeout: 2000, proxy: false });
+        return true;
+    } catch (e) {
+        return e.code !== 'ECONNREFUSED';
+    }
 }
 
 async function resolveProxyConfig() {
-  // 1. If PROXY_URL is set, sing-box should be running locally on 8080
-  if (PROXY_URL) {
-    const isSingboxUp = await detectSingboxProxy();
-    if (isSingboxUp) {
-      PROXY_CONFIG = { server: SINGBOX_LOCAL_PROXY };
-      console.log(`[Proxy] sing-box detected on ${SINGBOX_LOCAL_PROXY}`);
-      return;
+    if (PROXY_URL) {
+        const isSingboxUp = await detectSingboxProxy();
+        if (isSingboxUp) {
+            PROXY_CONFIG = { server: SINGBOX_LOCAL_PROXY };
+            console.log(`[Proxy] sing-box detected on ${SINGBOX_LOCAL_PROXY}`);
+            return;
+        }
+        console.log('[Proxy] PROXY_URL set but sing-box not responding on 8080, falling back to HTTP_PROXY');
     }
-    console.log('[Proxy] PROXY_URL set but sing-box not responding on 8080, falling back to HTTP_PROXY');
-  }
-
-  // 2. Fallback to HTTP_PROXY (traditional http://user:pass@host:port)
-  if (HTTP_PROXY) {
-    try {
-      const proxyUrl = new URL(HTTP_PROXY);
-      PROXY_CONFIG = {
-        server: `${proxyUrl.protocol}//${proxyUrl.hostname}:${proxyUrl.port}`,
-        username: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : undefined,
-        password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : undefined
-      };
-      console.log(`[Proxy] HTTP_PROXY detected: server=${PROXY_CONFIG.server}, auth=${PROXY_CONFIG.username ? 'Yes' : 'No'}`);
-    } catch (e) {
-      console.error('[Proxy] Invalid HTTP_PROXY format. Expected: http://user:pass@host:port or http://host:port');
-      process.exit(1);
+    if (HTTP_PROXY) {
+        try {
+            const proxyUrl = new URL(HTTP_PROXY);
+            PROXY_CONFIG = {
+                server: `${proxyUrl.protocol}//${proxyUrl.hostname}:${proxyUrl.port}`,
+                username: proxyUrl.username ? decodeURIComponent(proxyUrl.username) : undefined,
+                password: proxyUrl.password ? decodeURIComponent(proxyUrl.password) : undefined
+            };
+            console.log(`[Proxy] HTTP_PROXY detected: server=${PROXY_CONFIG.server}, auth=${PROXY_CONFIG.username ? 'Yes' : 'No'}`);
+        } catch (e) {
+            console.error('[Proxy] Invalid HTTP_PROXY format. Expected: http://user:pass@host:port or http://host:port');
+            process.exit(1);
+        }
     }
-  }
 }
 
 // --- INJECTED_SCRIPT ---
 const INJECTED_SCRIPT = `
 (function() {
     if (window.self === window.top) return;
-
-    // 1. 模拟鼠标屏幕坐标
     try {
         function getRandomInt(min, max) {
             return Math.floor(Math.random() * (max - min + 1)) + min;
         }
         let screenX = getRandomInt(800, 1200);
         let screenY = getRandomInt(400, 600);
-        
         Object.defineProperty(MouseEvent.prototype, 'screenX', { value: screenX });
         Object.defineProperty(MouseEvent.prototype, 'screenY', { value: screenY });
     } catch (e) { }
-
-    // 2. 简单的 attachShadow Hook
     try {
         const originalAttachShadow = Element.prototype.attachShadow;
-        
         Element.prototype.attachShadow = function(init) {
             const shadowRoot = originalAttachShadow.call(this, init);
-            
             if (shadowRoot) {
                 const checkAndReport = () => {
                     const checkbox = shadowRoot.querySelector('input[type="checkbox"]');
@@ -233,7 +206,6 @@ const INJECTED_SCRIPT = `
                     }
                     return false;
                 };
-
                 if (!checkAndReport()) {
                     const observer = new MutationObserver(() => {
                         if (checkAndReport()) observer.disconnect();
@@ -249,52 +221,35 @@ const INJECTED_SCRIPT = `
 })();
 `;
 
-// 辅助函数：检测代理是否可用
 async function checkProxy() {
-  if (!PROXY_CONFIG) return true;
-
-  console.log('[Proxy] Validating proxy connection...');
-  try {
-    const axiosConfig = {
-      proxy: false,
-      timeout: 10000
-    };
-
-    if (PROXY_CONFIG.server === SINGBOX_LOCAL_PROXY) {
-      // sing-box local proxy: use as plain HTTP proxy, no auth needed
-      axiosConfig.proxy = {
-        protocol: 'http',
-        host: '127.0.0.1',
-        port: 8080,
-      };
-    } else {
-      axiosConfig.proxy = {
-        protocol: 'http',
-        host: new URL(PROXY_CONFIG.server).hostname,
-        port: new URL(PROXY_CONFIG.server).port,
-      };
-      if (PROXY_CONFIG.username && PROXY_CONFIG.password) {
-        axiosConfig.proxy.auth = {
-          username: PROXY_CONFIG.username,
-          password: PROXY_CONFIG.password
-        };
-      }
+    if (!PROXY_CONFIG) return true;
+    console.log('[Proxy] Validating proxy connection...');
+    try {
+        const axiosConfig = { proxy: false, timeout: 10000 };
+        if (PROXY_CONFIG.server === SINGBOX_LOCAL_PROXY) {
+            axiosConfig.proxy = { protocol: 'http', host: '127.0.0.1', port: 8080 };
+        } else {
+            axiosConfig.proxy = {
+                protocol: 'http',
+                host: new URL(PROXY_CONFIG.server).hostname,
+                port: new URL(PROXY_CONFIG.server).port,
+            };
+            if (PROXY_CONFIG.username && PROXY_CONFIG.password) {
+                axiosConfig.proxy.auth = { username: PROXY_CONFIG.username, password: PROXY_CONFIG.password };
+            }
+        }
+        await axios.get('https://www.google.com', axiosConfig);
+        console.log('[Proxy] Connection successful!');
+        return true;
+    } catch (error) {
+        console.error(`[Proxy] Connection failed: ${error.message}`);
+        return false;
     }
-
-    await axios.get('https://www.google.com', axiosConfig);
-    console.log('[Proxy] Connection successful!');
-    return true;
-  } catch (error) {
-    console.error(`[Proxy] Connection failed: ${error.message}`);
-    return false;
-  }
 }
 
 function checkPort(port) {
     return new Promise((resolve) => {
-        const req = http.get(`http://localhost:${port}/json/version`, (res) => {
-            resolve(true);
-        });
+        const req = http.get(`http://localhost:${port}/json/version`, (res) => { resolve(true); });
         req.on('error', () => resolve(false));
         req.end();
     });
@@ -306,41 +261,29 @@ async function launchChrome() {
         console.log('Chrome 已开启。');
         return;
     }
-
     console.log(`正在启动 Chrome (路径: ${CHROME_PATH})...`);
-
     const args = [
         `--remote-debugging-port=${DEBUG_PORT}`,
         '--no-first-run',
         '--no-default-browser-check',
-        // '--headless=new', // (已被注释) 使用 xvfb-run 时不需要 headless 模式，这样可以模拟有头浏览器增加成功率
         '--disable-gpu',
         '--window-size=1280,720',
         '--no-sandbox',
         '--disable-setuid-sandbox',
-        '--user-data-dir=/tmp/chrome_user_data' // 必须指定用户数据目录，否则远程调试可能失败
+        '--user-data-dir=/tmp/chrome_user_data'
     ];
-
     if (PROXY_CONFIG) {
         args.push(`--proxy-server=${PROXY_CONFIG.server}`);
         args.push('--proxy-bypass-list=<-loopback>');
     }
-    // 添加针对 Linux 环境的额外稳定性参数
-    args.push('--disable-dev-shm-usage'); // 避免共享内存不足
-
-
-    const chrome = spawn(CHROME_PATH, args, {
-        detached: true,
-        stdio: 'ignore'
-    });
+    args.push('--disable-dev-shm-usage');
+    const chrome = spawn(CHROME_PATH, args, { detached: true, stdio: 'ignore' });
     chrome.unref();
-
     console.log('正在等待 Chrome 初始化...');
     for (let i = 0; i < 20; i++) {
         if (await checkPort(DEBUG_PORT)) break;
         await new Promise(r => setTimeout(r, 1000));
     }
-
     if (!await checkPort(DEBUG_PORT)) {
         console.error('Chrome 无法在端口 ' + DEBUG_PORT + ' 上启动');
         throw new Error('Chrome 启动失败');
@@ -348,8 +291,6 @@ async function launchChrome() {
 }
 
 function getUsers() {
-    // 从环境变量读取 JSON 字符串
-    // GitHub Actions Secret: USERS_JSON = [{"username":..., "password":...}]
     try {
         if (process.env.USERS_JSON) {
             const parsed = JSON.parse(process.env.USERS_JSON);
@@ -366,41 +307,23 @@ async function attemptTurnstileCdp(page) {
     for (const frame of frames) {
         try {
             const data = await frame.evaluate(() => window.__turnstile_data).catch(() => null);
-
             if (data) {
                 console.log('>> 在 frame 中发现 Turnstile。比例:', data);
-
                 const iframeElement = await frame.frameElement();
                 if (!iframeElement) continue;
-
                 const box = await iframeElement.boundingBox();
                 if (!box) continue;
-
                 const clickX = box.x + (box.width * data.xRatio);
                 const clickY = box.y + (box.height * data.yRatio);
-
                 console.log(`>> 计算点击坐标: (${clickX.toFixed(2)}, ${clickY.toFixed(2)})`);
-
                 const client = await page.context().newCDPSession(page);
-
                 await client.send('Input.dispatchMouseEvent', {
-                    type: 'mousePressed',
-                    x: clickX,
-                    y: clickY,
-                    button: 'left',
-                    clickCount: 1
+                    type: 'mousePressed', x: clickX, y: clickY, button: 'left', clickCount: 1
                 });
-
                 await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
-
                 await client.send('Input.dispatchMouseEvent', {
-                    type: 'mouseReleased',
-                    x: clickX,
-                    y: clickY,
-                    button: 'left',
-                    clickCount: 1
+                    type: 'mouseReleased', x: clickX, y: clickY, button: 'left', clickCount: 1
                 });
-
                 console.log('>> CDP 点击已发送。');
                 await client.detach();
                 return true;
@@ -410,24 +333,15 @@ async function attemptTurnstileCdp(page) {
     return false;
 }
 
-// --- 辅助函数：通过 CDP 派发鼠标点击事件 ---
 async function dispatchCdpClick(page, x, y) {
     const client = await page.context().newCDPSession(page);
     try {
         await client.send('Input.dispatchMouseEvent', {
-            type: 'mousePressed',
-            x: x,
-            y: y,
-            button: 'left',
-            clickCount: 1
+            type: 'mousePressed', x: x, y: y, button: 'left', clickCount: 1
         });
-        await new Promise(r => setTimeout(r, 50 + Math.random() * 100)); // 模拟人手点击延迟
+        await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
         await client.send('Input.dispatchMouseEvent', {
-            type: 'mouseReleased',
-            x: x,
-            y: y,
-            button: 'left',
-            clickCount: 1
+            type: 'mouseReleased', x: x, y: y, button: 'left', clickCount: 1
         });
         console.log(`>> CDP 坐标 (${x.toFixed(2)}, ${y.toFixed(2)}) 点击已发送。`);
         return true;
@@ -449,13 +363,11 @@ async function getAltchaStatus(page) {
                 if (value == null) return '';
                 return String(value).trim();
             };
-
             const widget = document.querySelector('altcha-widget');
             const altchaInputs = Array.from(document.querySelectorAll('input[name="altcha"], textarea[name="altcha"], input[name*="altcha" i], textarea[name*="altcha" i]'));
             const firstFilledInput = altchaInputs.find((input) => normalize(input.value).length > 0);
             const shadowRoot = widget ? widget.shadowRoot : null;
             const checkbox = shadowRoot ? shadowRoot.querySelector('input[type="checkbox"], [role="checkbox"]') : null;
-
             const stateProp = normalize(widget ? widget.state : '');
             const stateAttr = normalize(widget ? widget.getAttribute('state') : '');
             const valueProp = normalize(widget ? widget.value : '');
@@ -467,14 +379,9 @@ async function getAltchaStatus(page) {
             const state = stateProp || stateAttr || '';
             const isSolved = state === 'verified' || valueProp.length > 0 || valueAttr.length > 0 || hiddenInputValue.length > 0;
             const isVerifying = !isSolved && (
-                state === 'verifying' ||
-                state === 'processing' ||
-                state === 'working' ||
-                checkboxChecked === true ||
-                ariaChecked === 'true' ||
-                busyAttr === 'true'
+                state === 'verifying' || state === 'processing' || state === 'working' ||
+                checkboxChecked === true || ariaChecked === 'true' || busyAttr === 'true'
             );
-
             return {
                 exists: !!widget || altchaInputs.length > 0,
                 solved: isSolved,
@@ -489,18 +396,7 @@ async function getAltchaStatus(page) {
             };
         });
     } catch (e) {
-        return {
-            exists: false,
-            solved: false,
-            isVerifying: false,
-            state: 'error',
-            hasShadowRoot: false,
-            checkboxChecked: null,
-            ariaChecked: '',
-            valueLength: 0,
-            hiddenInputLength: 0,
-            busy: false
-        };
+        return { exists: false, solved: false, isVerifying: false, state: 'error', hasShadowRoot: false, checkboxChecked: null, ariaChecked: '', valueLength: 0, hiddenInputLength: 0, busy: false };
     }
 }
 
@@ -519,26 +415,21 @@ async function attemptAltchaClick(page, currentStatus = null) {
     try {
         const altchaWidget = page.locator('altcha-widget').first();
         if (await altchaWidget.count() > 0) {
-
             const status = currentStatus || await getAltchaStatus(page);
             if (status.solved) return false;
             if (status.isVerifying) {
                 console.log(`>> ALTCHA 正在验证中，跳过重复点击。${formatAltchaStatus(status)}`);
                 return false;
             }
-
             await page.waitForTimeout(500);
             await altchaWidget.scrollIntoViewIfNeeded().catch(() => {});
-
             let boxInfo = await page.evaluate(() => {
                 const widget = document.querySelector('altcha-widget');
                 if (!widget) return null;
-
                 const pickClickTarget = (root) => {
                     if (!root) return null;
                     return root.querySelector('input[type="checkbox"], [role="checkbox"], label, button');
                 };
-
                 if (widget.shadowRoot) {
                     const target = pickClickTarget(widget.shadowRoot);
                     if (target) {
@@ -546,17 +437,14 @@ async function attemptAltchaClick(page, currentStatus = null) {
                         return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: true, tagName: target.tagName };
                     }
                 }
-
                 const lightDomTarget = pickClickTarget(widget);
                 if (lightDomTarget) {
                     const rect = lightDomTarget.getBoundingClientRect();
                     return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: true, tagName: lightDomTarget.tagName };
                 }
-
                 const rect = widget.getBoundingClientRect();
                 return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: false, tagName: widget.tagName };
             });
-
             if (boxInfo && boxInfo.width > 0 && boxInfo.height > 0) {
                 let clickX, clickY;
                 if (boxInfo.isExact) {
@@ -568,19 +456,14 @@ async function attemptAltchaClick(page, currentStatus = null) {
                     clickY = boxInfo.y + boxInfo.height / 2;
                     console.log(`>> 未获取内部复选框，使用估算坐标: (${clickX.toFixed(2)}, ${clickY.toFixed(2)})`);
                 }
-
                 await dispatchCdpClick(page, clickX, clickY);
-
                 await page.evaluate(() => {
                     const widget = document.querySelector('altcha-widget');
                     if (widget && widget.shadowRoot) {
                         const cb = widget.shadowRoot.querySelector('input[type="checkbox"]');
-                        if (cb && !cb.checked) {
-                            cb.click();
-                        }
+                        if (cb && !cb.checked) cb.click();
                     }
                 });
-
                 return true;
             } else {
                 console.log('>> 找到了 ALTCHA 元素，但获取不到有效大小，跳过点击。');
@@ -595,117 +478,151 @@ async function attemptAltchaClick(page, currentStatus = null) {
 async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts = 15, waitAfterClick = 8000) {
     console.log(`[${stageName}] 开始检测 ALTCHA Captcha...`);
     let sawAltcha = false;
-
     const startedAt = Date.now();
     const totalWaitBudget = Math.max(waitAfterClick * maxAttempts, waitAfterClick);
     let clickAttempts = 0;
     let lastStatusText = '';
-
     while (Date.now() - startedAt < totalWaitBudget) {
         const status = await getAltchaStatus(page);
         if (status.exists) sawAltcha = true;
-
         const statusText = formatAltchaStatus(status);
         if (status.exists && statusText !== lastStatusText) {
             console.log(`[${stageName}] ALTCHA 状态: ${statusText}`);
             lastStatusText = statusText;
         }
-
         if (status.solved) {
             console.log(`[${stageName}] ✅ ALTCHA 已通过验证。`);
             return true;
         }
-
         if (!status.exists) {
             await page.waitForTimeout(1000);
             continue;
         }
-
         if (status.isVerifying) {
             await page.waitForTimeout(1000);
             continue;
         }
-
         if (clickAttempts >= maxAttempts) {
             console.log(`[${stageName}] 已达到 ALTCHA 最大点击次数 (${maxAttempts})，继续等待最终结果...`);
             await page.waitForTimeout(1000);
             continue;
         }
-
         const clicked = await attemptAltchaClick(page, status);
         if (!clicked) {
             await page.waitForTimeout(1000);
             continue;
         }
-
         clickAttempts += 1;
         console.log(`[${stageName}] 已点击 ALTCHA，等待 PoW 哈希计算完成 (${waitAfterClick}ms)，当前点击 ${clickAttempts}/${maxAttempts}...`);
-
         const clickStartedAt = Date.now();
         let observedVerification = false;
-
         while (Date.now() - clickStartedAt < waitAfterClick) {
             await page.waitForTimeout(1000);
-
             const followupStatus = await getAltchaStatus(page);
             if (followupStatus.exists) sawAltcha = true;
-
             const followupText = formatAltchaStatus(followupStatus);
             if (followupStatus.exists && followupText !== lastStatusText) {
                 console.log(`[${stageName}] ALTCHA 状态: ${followupText}`);
                 lastStatusText = followupText;
             }
-
             if (followupStatus.solved) {
                 console.log(`[${stageName}] ✅ ALTCHA 验证通过 (PoW 计算完成)！`);
                 return true;
             }
-
             if (followupStatus.isVerifying) {
                 observedVerification = true;
                 continue;
             }
-
             if (!observedVerification && Date.now() - clickStartedAt >= 2500) {
                 console.log(`[${stageName}] ⚠️ 点击后未观察到 ALTCHA 进入 verifying 状态，准备重新尝试点击...`);
                 break;
             }
         }
     }
-
     if (!sawAltcha) {
         console.log(`[${stageName}] 弹窗中未检测到 ALTCHA 组件。`);
         return true;
     }
-
     const finalStatus = await getAltchaStatus(page);
     console.log(`[${stageName}] 检测到 ALTCHA，但在 ${Math.ceil((Date.now() - startedAt) / 1000)} 秒内未能通过验证。最终状态: ${formatAltchaStatus(finalStatus)}`);
     return false;
 }
 
+// ==================== 抓取 Service information ====================
+
+/**
+ * 抓取页面中的 Service information 信息
+ */
+async function getServiceInfo(page) {
+    try {
+        const info = await page.evaluate(() => {
+            const result = {};
+            const fullText = document.body.innerText || '';
+            
+            // 匹配 Renew period
+            const rpMatch = fullText.match(/Renew period[:\s]+([^\n]+)/i);
+            if (rpMatch) result.renewPeriod = rpMatch[1].trim();
+            
+            // 匹配 Expiry
+            const expMatch = fullText.match(/Expiry[:\s]+([^\n]+)/i);
+            if (expMatch) result.expiry = expMatch[1].trim();
+            
+            // 匹配 Auto renew
+            const arMatch = fullText.match(/Auto renew[:\s]+([^\n]+)/i);
+            if (arMatch) result.autoRenew = arMatch[1].trim();
+            
+            // 匹配 Price
+            const prMatch = fullText.match(/Price[:\s]+([^\n]+)/i);
+            if (prMatch) result.price = prMatch[1].trim();
+            
+            return result;
+        });
+        
+        let text = '';
+        if (info.renewPeriod) text += `Renew period: ${info.renewPeriod}\n`;
+        if (info.expiry) text += `Expiry: ${info.expiry}\n`;
+        if (info.autoRenew) text += `Auto renew: ${info.autoRenew}\n`;
+        if (info.price) text += `Price: ${info.price}\n`;
+        
+        return text || 'Service information: 未获取到';
+    } catch (e) {
+        console.log('获取 Service information 失败:', e.message);
+        return 'Service information: 获取失败';
+    }
+}
+
+/**
+ * 格式化消息，添加抬头和 Service information
+ */
+function formatMessage(baseText, serviceInfo) {
+    return `[katabump-renew]\n${baseText}\n\n[Service information]\n${serviceInfo}`;
+}
+
+// ==================== 主程序 ====================
+
 (async () => {
-  // Random delay for scheduled runs (anti-detection)
-  if (GITHUB_EVENT_NAME === 'schedule') {
-    const maxDelaySec = 3 * 60 * 60;
-    const delaySec = Math.floor(Math.random() * maxDelaySec);
-    const hours = Math.floor(delaySec / 3600);
-    const minutes = Math.floor((delaySec % 3600) / 60);
-    const seconds = delaySec % 60;
-    console.log(`[Anti-Detection] Scheduled run: random delay ${hours}h ${minutes}m ${seconds}s...`);
-    await new Promise(r => setTimeout(r, delaySec * 1000));
-  } else {
-    console.log(`[Anti-Detection] Manual/direct run: skipping random delay.`);
-  }
+    // Random delay for scheduled runs
+    if (GITHUB_EVENT_NAME === 'schedule') {
+        const maxDelaySec = 3 * 60 * 60;
+        const delaySec = Math.floor(Math.random() * maxDelaySec);
+        const hours = Math.floor(delaySec / 3600);
+        const minutes = Math.floor((delaySec % 3600) / 60);
+        const seconds = delaySec % 60;
+        console.log(`[Anti-Detection] Scheduled run: random delay ${hours}h ${minutes}m ${seconds}s...`);
+        await new Promise(r => setTimeout(r, delaySec * 1000));
+    } else {
+        console.log(`[Anti-Detection] Manual/direct run: skipping random delay.`);
+    }
 
-  const users = getUsers();
-  if (users.length === 0) {
-    console.log('未在 process.env.USERS_JSON 中找到用户');
-    process.exit(1);
-  }
+    const users = getUsers();
+    if (users.length === 0) {
+        console.log('未在 process.env.USERS_JSON 中找到用户');
+        process.exit(1);
+    }
 
-  await resolveProxyConfig();
+    await resolveProxyConfig();
 
-  if (PROXY_CONFIG) {
+    if (PROXY_CONFIG) {
         const isValid = await checkProxy();
         if (!isValid) {
             console.error('[代理] 代理无效，终止运行。');
@@ -752,34 +669,36 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
 
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
-        console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`); // 隐去具体邮箱 logging
+        const maskedUser = maskEmail(user.username);
+        
+        // 日志中使用脱敏账号
+        console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} (${maskedUser}) ===`);
 
         try {
             if (page.isClosed()) {
                 page = await context.newPage();
-                // Context credentials apply
                 await page.addInitScript(INJECTED_SCRIPT);
             }
 
-            // --- 登录逻辑 (简略版，逻辑一致) ---
+            // 登出（如果已在 dashboard）
             if (page.url().includes('dashboard')) {
                 await page.goto('https://dashboard.katabump.com/auth/logout');
                 await page.waitForTimeout(2000);
             }
-            // 总是先去登录页
+            
+            // 进入登录页
             await page.goto('https://dashboard.katabump.com/auth/login');
             await page.waitForTimeout(2000);
             
-            // 📸 步骤1: 登录页截图
-            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step1_login_page.png`, 
-                `🔄 **开始处理用户**\n账号: ${user.username}\n步骤: 进入登录页面`);
-            
             if (page.url().includes('dashboard')) {
-                // 如果登出没成功，再次登出
                 await page.goto('https://dashboard.katabump.com/auth/logout');
                 await page.waitForTimeout(2000);
                 await page.goto('https://dashboard.katabump.com/auth/login');
             }
+
+            // 步骤1: 登录页截图
+            await screenshotAndNotify(page, `step1_login_page.png`, 
+                `[katabump-renew] 开始处理用户\n账号: ${maskedUser}\n步骤: 进入登录页面`);
 
             console.log('正在输入凭据...');
             try {
@@ -790,7 +709,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
 
-                // --- Cloudflare Turnstile Bypass for Login ---
+                // Cloudflare Turnstile Bypass
                 console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
                 let cdpClickResult = false;
                 for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
@@ -823,25 +742,28 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 } else {
                     console.log('   >> 登录前未检测到或未点击 Turnstile，继续操作...');
                 }
-                // --------------------------------------------
 
-                // 📸 步骤2: 填写完凭据后截图（点击登录前）
-                await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step2_filled_login.png`,
-                    `📝 **已填写登录信息**\n账号: ${user.username}\n状态: 准备点击登录`);
+                // 步骤2: 填写完凭据后截图
+                await screenshotAndNotify(page, `step2_filled_login.png`,
+                    `[katabump-renew] 已填写登录信息\n账号: ${maskedUser}\n状态: 准备点击登录`);
 
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
 
-                // User Request: Check for incorrect password
+                // 检查密码错误
                 try {
                     const errorMsg = page.getByText('Incorrect password or no account');
                     if (await errorMsg.isVisible({ timeout: 3000 })) {
-                        console.error(` >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
+                        console.error(` >> ❌ 登录失败: 用户 ${maskedUser} 账号或密码错误`);
                         
-                        // 📸 登录失败截图
-                        await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_login_fail.png`,
-                            `❌ **登录失败**\n用户: ${user.username}\n原因: 账号或密码错误`);
-
-                        await sendWecomMessage(`❌ **登录失败**\n用户: ${user.username}\n原因: 账号或密码错误`);
+                        const failShot = await screenshotAndNotify(page, `login_fail.png`,
+                            `[katabump-renew] 登录失败\n账号: ${maskedUser}\n原因: 账号或密码错误`);
+                        
+                        const serviceInfo = await getServiceInfo(page);
+                        const msg = formatMessage(
+                            `❌ 登录失败\n账号: ${maskedUser}\n原因: 账号或密码错误`,
+                            serviceInfo
+                        );
+                        await sendWecomMessage(msg, failShot);
 
                         continue;
                     }
@@ -851,10 +773,10 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 console.log('登录错误:', e.message);
             }
 
-            // 📸 步骤3: 登录后 Dashboard 截图
+            // 步骤3: 登录后 Dashboard 截图
             await page.waitForTimeout(2000);
-            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step3_dashboard.png`,
-                `✅ **登录成功**\n用户: ${user.username}\n步骤: 已进入 Dashboard`);
+            await screenshotAndNotify(page, `step3_dashboard.png`,
+                `[katabump-renew] 登录成功\n账号: ${maskedUser}\n步骤: 已进入 Dashboard`);
 
             console.log('正在寻找 "See" 链接...');
             try {
@@ -866,24 +788,20 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 continue;
             }
 
-            // 📸 步骤4: 进入服务器详情页截图
+            // 步骤4: 进入服务器详情页截图
             await page.waitForTimeout(2000);
-            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step4_server_detail.png`,
-                `📋 **进入服务器详情**\n用户: ${user.username}`);
+            await screenshotAndNotify(page, `step4_server_detail.png`,
+                `[katabump-renew] 进入服务器详情\n账号: ${maskedUser}`);
 
             // --- Renew 逻辑 ---
             let renewSuccess = false;
-            // 2. 一个扁平化的主循环：尝试 Renew 整个流程 (最多 20 次)
             for (let attempt = 1; attempt <= 20; attempt++) {
                 let hasCaptchaError = false;
 
-                // 1. 如果是重试 (attempt > 1)，说明之前失败了或者刚刷新完页面
-                // 我们直接开始寻找 Renew 按钮
                 console.log(`\n[尝试 ${attempt}/20] 正在寻找 Renew 按钮...`);
 
                 const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
                 try {
-                    // 稍微等待一下，防止页面刚刷新还没渲染出来
                     await renewBtn.waitFor({ state: 'visible', timeout: 5000 });
                 } catch (e) { }
 
@@ -892,22 +810,24 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                     console.log('Renew 按钮已点击。等待模态框...');
 
                     const modal = page.locator('#renew-modal');
-                    try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) {
+                    try { 
+                        await modal.waitFor({ state: 'visible', timeout: 5000 }); 
+                    } catch (e) {
                         console.log('模态框未出现？重试中...');
                         continue;
                     }
 
-                    // 📸 步骤5: Renew 弹窗出现截图
-                    await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step5_renew_modal_${attempt}.png`,
-                        `🔄 **Renew 弹窗出现**\n用户: ${user.username}\n尝试: ${attempt}/20`);
+                    // 步骤5: Renew 弹窗出现截图
+                    await screenshotAndNotify(page, `step5_renew_modal_${attempt}.png`,
+                        `[katabump-renew] Renew 弹窗出现\n账号: ${maskedUser}\n尝试: ${attempt}/20`);
 
-                    // A. 在模态框里晃晃鼠标
+                    // 模态框里晃晃鼠标
                     try {
                         const box = await modal.boundingBox();
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // B. 找 Turnstile (小重试)
+                    // 找 Turnstile
                     console.log('正在检查 Turnstile (使用 CDP 绕过)...');
                     let cdpClickResult = false;
                     for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
@@ -925,7 +845,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         console.log('   >> 重试后仍未确认 Turnstile 复选框。');
                     }
 
-                    // C. 检查 Success 标志
+                    // 检查 Success 标志
                     const frames = page.frames();
                     for (const f of frames) {
                         if (f.url().includes('cloudflare')) {
@@ -939,7 +859,7 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         }
                     }
 
-                    // D. ALTCHA Captcha 处理 (本地版本关键功能)
+                    // ALTCHA Captcha 处理
                     const altchaOk = await solveAltchaIfPresent(page, "Renew弹窗", 15, 8000);
 
                     if (!altchaOk) {
@@ -953,29 +873,28 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         continue;
                     }
 
-                    // 📸 步骤6: 验证码通过后，点击确认前截图
-                    await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step6_before_confirm_${attempt}.png`,
-                        `🛡️ **验证码处理完成**\n用户: ${user.username}\nTurnstile: ${isTurnstileSuccess ? '✅' : '❓'}\nALTCHA: ✅\n准备点击确认 Renew`);
+                    // 步骤6: 验证码通过后，点击确认前截图
+                    await screenshotAndNotify(page, `step6_before_confirm_${attempt}.png`,
+                        `[katabump-renew] 验证码处理完成\n账号: ${maskedUser}\nTurnstile: ${isTurnstileSuccess ? '通过' : '未知'}\nALTCHA: 通过\n准备点击确认 Renew`);
 
-                    // E. 准备点击确认
+                    // 准备点击确认
                     const confirmBtn = modal.getByRole('button', { name: 'Renew' });
                     if (await confirmBtn.isVisible()) {
 
-                        console.log('   >> 点击 Renew 确认按钮 (无论 Turnstile 状态如何)...');
+                        console.log('   >> 点击 Renew 确认按钮...');
                         await confirmBtn.click();
 
                         try {
-                            // 1. Check for Errors (Captcha or Date limit)
                             const startVerifyTime = Date.now();
                             while (Date.now() - startVerifyTime < 3000) {
-                                // A. Captcha Error
+                                // Captcha Error
                                 if (await page.getByText('Please complete the captcha to continue').isVisible()) {
                                     console.log('   >> ⚠️ 检测到错误: "Please complete the captcha".');
                                     hasCaptchaError = true;
                                     break;
                                 }
 
-                                // B. Not Renew Time Error
+                                // Not Renew Time Error
                                 const notTimeLoc = page.getByText("You can't renew your server yet");
                                 if (await notTimeLoc.isVisible()) {
                                     const text = await notTimeLoc.innerText();
@@ -983,13 +902,17 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                                     let dateStr = match ? match[1] : 'Unknown Date';
                                     console.log(`   >> ⏳ 暂无法续期。下次可用时间: ${dateStr}`);
 
-                                    // 📸 暂无法续期截图
-                                    await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_skip.png`,
-                                        `⏳ **暂无法续期**\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`);
+                                    const skipShot = await screenshotAndNotify(page, `skip.png`,
+                                        `[katabump-renew] 暂无法续期\n账号: ${maskedUser}\n原因: 还没到时间`);
 
-                                    await sendWecomMessage(`⏳ **暂无法续期 (跳过)**\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`);
+                                    const serviceInfo = await getServiceInfo(page);
+                                    const msg = formatMessage(
+                                        `⏳ 暂无法续期 (跳过)\n账号: ${maskedUser}\n原因: 还没到时间\n下次可用: ${dateStr}`,
+                                        serviceInfo
+                                    );
+                                    await sendWecomMessage(msg, skipShot);
 
-                                    renewSuccess = true; // Mark as done to stop retries
+                                    renewSuccess = true;
                                     try {
                                         const closeBtn = modal.getByLabel('Close');
                                         if (await closeBtn.isVisible()) await closeBtn.click();
@@ -1000,25 +923,29 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                             }
                         } catch (e) { }
 
-                        if (renewSuccess) break; // Break loop if not time yet
+                        if (renewSuccess) break;
 
                         if (hasCaptchaError) {
                             console.log('   >> Error found. Refreshing page to reset Turnstile...');
                             await page.reload();
                             await page.waitForTimeout(3000);
-                            continue; // 刷新后，重新开始大循环
+                            continue;
                         }
 
-                        // F. 检查成功 (模态框消失)
+                        // 检查成功 (模态框消失)
                         await page.waitForTimeout(2000);
                         if (!await modal.isVisible()) {
                             console.log('   >> ✅ Modal closed. Renew successful!');
 
-                            // 📸 续期成功截图
-                            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_success.png`,
-                                `✅ **续期成功**\n用户: ${user.username}\n状态: 服务器已成功续期！`);
+                            const successShot = await screenshotAndNotify(page, `success.png`,
+                                `[katabump-renew] 续期成功\n账号: ${maskedUser}\n状态: 服务器已成功续期！`);
 
-                            await sendWecomMessage(`✅ **续期成功**\n用户: ${user.username}\n状态: 服务器已成功续期！`);
+                            const serviceInfo = await getServiceInfo(page);
+                            const msg = formatMessage(
+                                `✅ 续期成功\n账号: ${maskedUser}\n状态: 服务器已成功续期！`,
+                                serviceInfo
+                            );
+                            await sendWecomMessage(msg, successShot);
                             renewSuccess = true;
                             break;
                         } else {
@@ -1040,43 +967,45 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 }
             }
 
-            // 如果 20 次都失败了
+            // 20 次都失败
             if (!renewSuccess) {
-                // 📸 最终失败截图
-                await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_final_fail.png`,
-                    `❌ **续期最终失败**\n用户: ${user.username}\n原因: 超过最大重试次数 (20次)`);
+                const failShot = await screenshotAndNotify(page, `final_fail.png`,
+                    `[katabump-renew] 续期最终失败\n账号: ${maskedUser}\n原因: 超过最大重试次数 (20次)`);
                 
-                await sendWecomMessage(`❌ **续期失败**\n用户: ${user.username}\n原因: 超过最大重试次数，请手动检查`);
+                const serviceInfo = await getServiceInfo(page);
+                const msg = formatMessage(
+                    `❌ 续期失败\n账号: ${maskedUser}\n原因: 超过最大重试次数，请手动检查`,
+                    serviceInfo
+                );
+                await sendWecomMessage(msg, failShot);
             }
 
         } catch (err) {
-            console.error(`Error processing user:`, err);
+            console.error(`Error processing user ${maskedUser}:`, err);
             
-            // 📸 异常截图
-            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_error.png`,
-                `💥 **处理异常**\n用户: ${user.username}\n错误: ${err.message}`);
+            const errorShot = await screenshotAndNotify(page, `error.png`,
+                `[katabump-renew] 处理异常\n账号: ${maskedUser}\n错误: ${err.message}`);
             
-            await sendWecomMessage(`💥 **处理异常**\n用户: ${user.username}\n错误: ${err.message}`);
+            const serviceInfo = await getServiceInfo(page);
+            const msg = formatMessage(
+                `💥 处理异常\n账号: ${maskedUser}\n错误: ${err.message}`,
+                serviceInfo
+            );
+            await sendWecomMessage(msg, errorShot);
         }
 
-        // Snapshot before handling next user
-        // In GitHub Actions, we save to 'screenshots' dir
-        const photoDir = path.join(process.cwd(), 'screenshots');
-        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-        // Use safe filename
-        const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-        const screenshotPath = path.join(photoDir, `${safeUsername}.png`);
-        try {
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            console.log(`截图已保存至: ${screenshotPath}`);
-        } catch (e) {
-            console.log('截图失败:', e.message);
-        }
-
-        console.log(`用户处理完成\n`);
+        console.log(`用户 ${maskedUser} 处理完成\n`);
     }
 
     console.log('完成。');
+    
+    // 清理临时截图目录
+    const tmpDir = path.join(process.cwd(), 'tmp_screenshots');
+    if (fs.existsSync(tmpDir)) {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        console.log('临时截图已清理。');
+    }
+    
     await browser.close();
     process.exit(0);
 })();
