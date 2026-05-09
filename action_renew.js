@@ -3,45 +3,141 @@ const stealth = require('puppeteer-extra-plugin-stealth')();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn, exec } = require('child_process');
 const http = require('http');
 
-const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
-const TG_CHAT_ID = process.env.TG_CHAT_ID;
+// ==================== 企业微信机器人配置 ====================
+const WECOM_BOT_KEY = process.env.WECOM_BOT_KEY;
+// 企业微信机器人 Webhook 基础地址
+const WECOM_WEBHOOK_BASE = 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send';
+
 const GITHUB_EVENT_NAME = process.env.GITHUB_EVENT_NAME || '';
 
 // Anti-detection: scheduled runs get 0-3h random delay; manual runs skip delay
 const SINGBOX_LOCAL_PROXY = 'http://127.0.0.1:8080';
 
-async function sendTelegramMessage(message, imagePath = null) {
-    if (!TG_BOT_TOKEN || !TG_CHAT_ID) return;
+// ==================== 企业微信消息发送函数 ====================
 
-    // 1. 发送文字消息
-    try {
-        const url = `https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage`;
-        await axios.post(url, {
-            chat_id: TG_CHAT_ID,
-            text: message,
-            parse_mode: 'Markdown'
-        });
-        console.log('[Telegram] Message sent.');
-    } catch (e) {
-        console.error('[Telegram] Failed to send message:', e.message);
+/**
+ * 发送企业微信文本/Markdown 消息
+ * @param {string} content - Markdown 格式的消息内容
+ */
+async function sendWecomText(content) {
+    if (!WECOM_BOT_KEY) {
+        console.log('[WeCom] WECOM_BOT_KEY not set, skipping message.');
+        return;
     }
 
-    // 2. 发送图片 (如果有)
-    if (imagePath && fs.existsSync(imagePath)) {
-        console.log('[Telegram] Sending photo...');
-        // 使用 curl 发送图片，避免引入额外的 multipart 依赖
-        // 注意：Windows 本地测试可能需要环境支持 curl，GitHub Actions (Ubuntu) 默认支持
-        const cmd = `curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendPhoto" -F chat_id="${TG_CHAT_ID}" -F photo="@${imagePath}"`;
-        await new Promise(resolve => {
-            exec(cmd, (err) => {
-                if (err) console.error('[Telegram] Failed to send photo via curl:', err.message);
-                else console.log('[Telegram] Photo sent.');
-                resolve();
-            });
+    try {
+        const url = `${WECOM_WEBHOOK_BASE}?key=${WECOM_BOT_KEY}`;
+        await axios.post(url, {
+            msgtype: 'markdown',
+            markdown: {
+                content: content
+            }
+        }, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 10000
         });
+        console.log('[WeCom] Markdown message sent.');
+    } catch (e) {
+        console.error('[WeCom] Failed to send markdown message:', e.message);
+    }
+}
+
+/**
+ * 发送企业微信图片消息（Base64 + MD5）
+ * 图片会在个人微信中正常显示
+ * @param {string} imagePath - 本地图片路径
+ * @param {string} caption - 可选的说明文字（会单独发一条 markdown）
+ */
+async function sendWecomImage(imagePath, caption = '') {
+    if (!WECOM_BOT_KEY) {
+        console.log('[WeCom] WECOM_BOT_KEY not set, skipping image.');
+        return;
+    }
+
+    if (!fs.existsSync(imagePath)) {
+        console.log(`[WeCom] Image not found: ${imagePath}`);
+        return;
+    }
+
+    try {
+        // 1. 读取图片并计算 base64 和 md5（base64 编码前的原始内容）
+        const imgBuffer = fs.readFileSync(imagePath);
+        
+        // 检查大小：base64 编码前不能超过 2MB
+        if (imgBuffer.length > 2 * 1024 * 1024) {
+            console.log(`[WeCom] Image too large (${(imgBuffer.length / 1024 / 1024).toFixed(2)}MB > 2MB), skipping.`);
+            return;
+        }
+
+        const base64 = imgBuffer.toString('base64');
+        const md5 = crypto.createHash('md5').update(imgBuffer).digest('hex');
+
+        // 2. 发送图片消息
+        const url = `${WECOM_WEBHOOK_BASE}?key=${WECOM_BOT_KEY}`;
+        await axios.post(url, {
+            msgtype: 'image',
+            image: {
+                base64: base64,
+                md5: md5
+            }
+        }, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 30000
+        });
+        console.log(`[WeCom] Image sent: ${path.basename(imagePath)}`);
+
+        // 3. 如果有说明文字，单独发一条 markdown
+        if (caption) {
+            await sendWecomText(caption);
+        }
+    } catch (e) {
+        console.error('[WeCom] Failed to send image:', e.message);
+    }
+}
+
+/**
+ * 组合发送：先发文字，再发图片
+ * @param {string} text - Markdown 文字
+ * @param {string} imagePath - 图片路径
+ */
+async function sendWecomMessage(text, imagePath = null) {
+    // 先发文字
+    await sendWecomText(text);
+    // 再发图片（如果有）
+    if (imagePath) {
+        await sendWecomImage(imagePath);
+    }
+}
+
+// ==================== 截图辅助函数 ====================
+
+/**
+ * 截图并立即发送到企业微信
+ * @param {object} page - Playwright page 对象
+ * @param {string} filename - 截图文件名（不含路径）
+ * @param {string} caption - 企业微信图片说明（可选）
+ * @returns {string} 截图完整路径
+ */
+async function screenshotAndNotify(page, filename, caption = '') {
+    const photoDir = path.join(process.cwd(), 'screenshots');
+    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+    
+    const screenshotPath = path.join(photoDir, filename);
+    try {
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`[Screenshot] Saved: ${filename}`);
+        
+        if (WECOM_BOT_KEY) {
+            await sendWecomImage(screenshotPath, caption);
+        }
+        return screenshotPath;
+    } catch (e) {
+        console.log('[Screenshot] Failed:', e.message);
+        return null;
     }
 }
 
@@ -673,6 +769,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
             // 总是先去登录页
             await page.goto('https://dashboard.katabump.com/auth/login');
             await page.waitForTimeout(2000);
+            
+            // 📸 步骤1: 登录页截图
+            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step1_login_page.png`, 
+                `🔄 **开始处理用户**\n账号: ${user.username}\n步骤: 进入登录页面`);
+            
             if (page.url().includes('dashboard')) {
                 // 如果登出没成功，再次登出
                 await page.goto('https://dashboard.katabump.com/auth/logout');
@@ -724,20 +825,23 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 }
                 // --------------------------------------------
 
+                // 📸 步骤2: 填写完凭据后截图（点击登录前）
+                await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step2_filled_login.png`,
+                    `📝 **已填写登录信息**\n账号: ${user.username}\n状态: 准备点击登录`);
+
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
 
                 // User Request: Check for incorrect password
                 try {
                     const errorMsg = page.getByText('Incorrect password or no account');
-        if (await errorMsg.isVisible({ timeout: 3000 })) {
-          console.error(` >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
-          const failPhotoDir = path.join(process.cwd(), 'screenshots');
-          if (!fs.existsSync(failPhotoDir)) fs.mkdirSync(failPhotoDir, { recursive: true });
-          const failSafeName = user.username.replace(/[^a-z0-9]/gi, '_');
-          const failShotPath = path.join(failPhotoDir, `${failSafeName}_login_fail.png`);
-          try { await page.screenshot({ path: failShotPath, fullPage: true }); } catch (e) { }
+                    if (await errorMsg.isVisible({ timeout: 3000 })) {
+                        console.error(` >> ❌ 登录失败: 用户 ${user.username} 账号或密码错误`);
+                        
+                        // 📸 登录失败截图
+                        await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_login_fail.png`,
+                            `❌ **登录失败**\n用户: ${user.username}\n原因: 账号或密码错误`);
 
-          await sendTelegramMessage(`❌ *登录失败*\n用户: ${user.username}\n原因: 账号或密码错误`, failShotPath);
+                        await sendWecomMessage(`❌ **登录失败**\n用户: ${user.username}\n原因: 账号或密码错误`);
 
                         continue;
                     }
@@ -746,6 +850,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
             } catch (e) {
                 console.log('登录错误:', e.message);
             }
+
+            // 📸 步骤3: 登录后 Dashboard 截图
+            await page.waitForTimeout(2000);
+            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step3_dashboard.png`,
+                `✅ **登录成功**\n用户: ${user.username}\n步骤: 已进入 Dashboard`);
 
             console.log('正在寻找 "See" 链接...');
             try {
@@ -756,6 +865,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                 console.log('未找到 "See" 按钮。');
                 continue;
             }
+
+            // 📸 步骤4: 进入服务器详情页截图
+            await page.waitForTimeout(2000);
+            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step4_server_detail.png`,
+                `📋 **进入服务器详情**\n用户: ${user.username}`);
 
             // --- Renew 逻辑 ---
             let renewSuccess = false;
@@ -782,6 +896,10 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         console.log('模态框未出现？重试中...');
                         continue;
                     }
+
+                    // 📸 步骤5: Renew 弹窗出现截图
+                    await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step5_renew_modal_${attempt}.png`,
+                        `🔄 **Renew 弹窗出现**\n用户: ${user.username}\n尝试: ${attempt}/20`);
 
                     // A. 在模态框里晃晃鼠标
                     try {
@@ -835,23 +953,14 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         continue;
                     }
 
+                    // 📸 步骤6: 验证码通过后，点击确认前截图
+                    await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_step6_before_confirm_${attempt}.png`,
+                        `🛡️ **验证码处理完成**\n用户: ${user.username}\nTurnstile: ${isTurnstileSuccess ? '✅' : '❓'}\nALTCHA: ✅\n准备点击确认 Renew`);
+
                     // E. 准备点击确认
                     const confirmBtn = modal.getByRole('button', { name: 'Renew' });
                     if (await confirmBtn.isVisible()) {
 
-                        // User Requested: Screenshot BEFORE final click
-                        const fs = require('fs');
-                        const path = require('path');
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                        const tsScreenshotName = `${safeUser}_Turnstile_${attempt}.png`;
-                        try {
-                            await page.screenshot({ path: path.join(photoDir, tsScreenshotName), fullPage: true });
-                            console.log(`   >> 📸 快照已保存: ${tsScreenshotName}`);
-                        } catch (e) { }
-
-                        // User Request: 找不到的话这个循环直接下一步点击renew，然后检测有没有Please complete the captcha to continue
                         console.log('   >> 点击 Renew 确认按钮 (无论 Turnstile 状态如何)...');
                         await confirmBtn.click();
 
@@ -874,16 +983,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                                     let dateStr = match ? match[1] : 'Unknown Date';
                                     console.log(`   >> ⏳ 暂无法续期。下次可用时间: ${dateStr}`);
 
-                                    // 截图证明
-                                    const fs = require('fs');
-                                    const path = require('path');
-                                    const photoDir = path.join(process.cwd(), 'screenshots');
-                                    if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                                    const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                                    const skipShotPath = path.join(photoDir, `${safeUser}_skip.png`);
-                                    try { await page.screenshot({ path: skipShotPath, fullPage: true }); } catch (e) { }
+                                    // 📸 暂无法续期截图
+                                    await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_skip.png`,
+                                        `⏳ **暂无法续期**\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`);
 
-                                    await sendTelegramMessage(`⏳ *暂无法续期 (跳过)*\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`, skipShotPath);
+                                    await sendWecomMessage(`⏳ **暂无法续期 (跳过)**\n用户: ${user.username}\n原因: 还没到时间\n下次可用: ${dateStr}`);
 
                                     renewSuccess = true; // Mark as done to stop retries
                                     try {
@@ -910,16 +1014,11 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                         if (!await modal.isVisible()) {
                             console.log('   >> ✅ Modal closed. Renew successful!');
 
-                            // 截图成功状态
-                            const fs = require('fs');
-                            const path = require('path');
-                            const photoDir = path.join(process.cwd(), 'screenshots');
-                            if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                            const safeUser = user.username.replace(/[^a-z0-9]/gi, '_');
-                            const successShotPath = path.join(photoDir, `${safeUser}_success.png`);
-                            try { await page.screenshot({ path: successShotPath, fullPage: true }); } catch (e) { }
+                            // 📸 续期成功截图
+                            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_success.png`,
+                                `✅ **续期成功**\n用户: ${user.username}\n状态: 服务器已成功续期！`);
 
-                            await sendTelegramMessage(`✅ *续期成功*\n用户: ${user.username}\n状态: 服务器已成功续期！`, successShotPath);
+                            await sendWecomMessage(`✅ **续期成功**\n用户: ${user.username}\n状态: 服务器已成功续期！`);
                             renewSuccess = true;
                             break;
                         } else {
@@ -940,14 +1039,28 @@ async function solveAltchaIfPresent(page, stageName = "Renew阶段", maxAttempts
                     break;
                 }
             }
+
+            // 如果 20 次都失败了
+            if (!renewSuccess) {
+                // 📸 最终失败截图
+                await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_final_fail.png`,
+                    `❌ **续期最终失败**\n用户: ${user.username}\n原因: 超过最大重试次数 (20次)`);
+                
+                await sendWecomMessage(`❌ **续期失败**\n用户: ${user.username}\n原因: 超过最大重试次数，请手动检查`);
+            }
+
         } catch (err) {
             console.error(`Error processing user:`, err);
+            
+            // 📸 异常截图
+            await screenshotAndNotify(page, `${user.username.replace(/[^a-z0-9]/gi, '_')}_error.png`,
+                `💥 **处理异常**\n用户: ${user.username}\n错误: ${err.message}`);
+            
+            await sendWecomMessage(`💥 **处理异常**\n用户: ${user.username}\n错误: ${err.message}`);
         }
 
         // Snapshot before handling next user
         // In GitHub Actions, we save to 'screenshots' dir
-        const fs = require('fs');
-        const path = require('path');
         const photoDir = path.join(process.cwd(), 'screenshots');
         if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
         // Use safe filename
