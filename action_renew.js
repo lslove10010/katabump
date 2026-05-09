@@ -709,13 +709,18 @@ function formatMessage(baseText, serviceInfo) {
                 await pwdInput.fill(user.password);
                 await page.waitForTimeout(500);
 
-                // Cloudflare Turnstile Bypass
+                // Cloudflare Turnstile Bypass（最多3次）
                 console.log('   >> 正在登录前检查 Turnstile (使用 CDP 绕过)...');
                 let cdpClickResult = false;
-                for (let findAttempt = 0; findAttempt < 15; findAttempt++) {
+                for (let findAttempt = 0; findAttempt < 3; findAttempt++) {
                     cdpClickResult = await attemptTurnstileCdp(page);
                     if (cdpClickResult) break;
+                    console.log(`   >> [登录寻找尝试 ${findAttempt + 1}/3] 尚未找到 Turnstile...`);
                     await page.waitForTimeout(1000);
+                }
+                
+                if (!cdpClickResult) {
+                    console.log('   >> 3次尝试后未找到 Turnstile，继续登录流程...');
                 }
 
                 if (cdpClickResult) {
@@ -827,22 +832,24 @@ function formatMessage(baseText, serviceInfo) {
                         if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                     } catch (e) { }
 
-                    // 找 Turnstile
+                    // 找 Turnstile（最多3次，没找到直接继续）
                     console.log('正在检查 Turnstile (使用 CDP 绕过)...');
                     let cdpClickResult = false;
-                    for (let findAttempt = 0; findAttempt < 30; findAttempt++) {
+                    for (let findAttempt = 0; findAttempt < 3; findAttempt++) {
                         cdpClickResult = await attemptTurnstileCdp(page);
                         if (cdpClickResult) break;
-                        console.log(`   >> [寻找尝试 ${findAttempt + 1}/30] 尚未找到 Turnstile 复选框...`);
+                        console.log(`   >> [寻找尝试 ${findAttempt + 1}/3] 尚未找到 Turnstile 复选框...`);
                         await page.waitForTimeout(1000);
+                    }
+                    
+                    if (!cdpClickResult) {
+                        console.log('   >> 3次尝试后未找到 Turnstile，跳过直接进入 ALTCHA 检测...');
                     }
 
                     let isTurnstileSuccess = false;
                     if (cdpClickResult) {
                         console.log('   >> CDP 点击生效。等待 8秒 Cloudflare 检查...');
                         await page.waitForTimeout(8000);
-                    } else {
-                        console.log('   >> 重试后仍未确认 Turnstile 复选框。');
                     }
 
                     // 检查 Success 标志
