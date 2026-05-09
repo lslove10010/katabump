@@ -1,69 +1,118 @@
-name: Katabump Auto Renew
+# .github/workflows/renew.yml
+name: KataBump Renew Bot
 
 on:
+  # 手动触发
+  workflow_dispatch:
+  
+  # 定时触发（UTC 时间，每天随机时段执行）
   schedule:
-  # 每天 UTC 0点 (北京时间 8点) 运行
-  - cron: '0 0 * * *'
-  workflow_dispatch: # 允许手动触发
+    # 每天 UTC 02:00-05:00 之间随机执行（对应北京时间 10:00-13:00）
+    # 实际随机延迟由脚本内的 0-3h 逻辑控制
+    - cron: '0 2 * * *'
+
+  # 可选：推送 main 分支时触发（用于调试）
+  # push:
+  #   branches: [main]
 
 jobs:
   renew:
     runs-on: ubuntu-latest
+    
+    env:
+      # 企业微信机器人 Key
+      WECOM_BOT_KEY: ${{ secrets.WECOM_BOT_KEY }}
+      # 用户信息 JSON
+      USERS_JSON: ${{ secrets.USERS_JSON }}
+      # Chrome 路径（GitHub Actions Ubuntu 默认路径）
+      CHROME_PATH: /usr/bin/google-chrome
+      # GitHub 事件名（用于脚本判断是否为定时任务）
+      GITHUB_EVENT_NAME: ${{ github.event_name }}
+      # 代理配置（可选，根据你的网络环境选择一种）
+      # 方案 A: sing-box 本地代理（需要在 steps 中启动 sing-box）
+      PROXY_URL: ${{ secrets.PROXY_URL }}
+      # 方案 B: 传统 HTTP 代理
+      # HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
+      # 禁用本地代理绕过
+      NO_PROXY: localhost,127.0.0.1
 
     steps:
-    - uses: actions/checkout@v4
+      # 1. 检出代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
+      # 2. 设置 Node.js 环境
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
 
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      # 3. 安装系统依赖（Chrome + Playwright 依赖 + curl）
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # 安装 Chrome
+          sudo apt-get install -y wget gnupg
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          # 安装 Playwright 系统依赖
+          sudo apt-get install -y libnss3 libatk-bridge2.0-0 libdrm-dev libxkbcommon-dev libgbm-dev libasound2
+          # 安装 curl（用于其他可能的 HTTP 请求）
+          sudo apt-get install -y curl
+          # 验证 Chrome 安装
+          google-chrome --version
 
-    - name: Start Proxy (sing-box)
-      env:
-        PROXY_URL: ${{ secrets.PROXY_URL }}
-      run: |
-        if [ -z "$PROXY_URL" ]; then
-          echo "PROXY_URL not set, skipping sing-box setup."
-          exit 0
-        fi
-        SINGBOX_VER="1.11.0"
-        echo "Downloading sing-box v${SINGBOX_VER}..."
-        wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VER}/sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-        tar -xzf "sing-box-${SINGBOX_VER}-linux-amd64.tar.gz"
-        mv "sing-box-${SINGBOX_VER}-linux-amd64/sing-box" ./sing-box
-        chmod +x ./sing-box
-        echo "Generating sing-box config from PROXY_URL..."
-        python proxy_handler.py
-        echo "Starting sing-box..."
-        nohup ./sing-box run -c config.json > singbox.log 2>&1 &
-        sleep 3
-        echo "sing-box started. PROXY_URL will be passed to action_renew.js."
+      # 4. 安装 Node.js 依赖
+      - name: Install npm dependencies
+        run: |
+          npm install
+          # 确保 playwright browsers 已安装
+          npx playwright install chromium
 
-    - name: Install Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb
-        npm install
-        npx playwright install-deps chrome
+      # 5. 可选：启动 sing-box 代理（如果使用 PROXY_URL）
+      # 如果你使用 HTTP_PROXY 而非 sing-box，可以删除此步骤
+      - name: Setup sing-box proxy (optional)
+        if: ${{ env.PROXY_URL != '' }}
+        run: |
+          # 下载 sing-box（根据最新版本调整）
+          SINGBOX_VERSION="1.10.0"
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          tar -xzf "sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          sudo mv sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box
+          sing-box version
+          
+          # 写入配置文件（你需要在 secrets 中提供配置，或在这里直接写）
+          # 方案 A: 从 secrets 读取 base64 编码的配置
+          mkdir -p ~/.config/sing-box
+          echo "${{ secrets.SINGBOX_CONFIG_BASE64 }}" | base64 -d > ~/.config/sing-box/config.json
+          
+          # 启动 sing-box（后台运行，监听 8080 端口）
+          nohup sing-box run -c ~/.config/sing-box/config.json > sing-box.log 2>&1 &
+          sleep 3
+          
+          # 验证 sing-box 是否启动
+          curl -s http://127.0.0.1:8080 || echo "sing-box 可能未就绪，脚本会自行检测"
 
-    - name: Run Renew Script
-      env:
-        USERS_JSON: ${{ secrets.USERS_JSON }}
-        HTTP_PROXY: ${{ secrets.HTTP_PROXY }}
-        PROXY_URL: ${{ secrets.PROXY_URL }}
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        GITHUB_EVENT_NAME: ${{ github.event_name }}
-      run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node action_renew.js
+      # 6. 运行续期脚本
+      - name: Run renew script
+        run: |
+          # 使用 xvfb-run 提供虚拟显示（Playwright 非 headless 模式需要）
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" node renew.js
 
-    - name: Upload Screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: screenshots
-        path: screenshots/
+      # 7. 上传截图作为 artifacts（无论成功失败都上传）
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_id }}-${{ github.run_attempt }}
+          path: screenshots/
+          retention-days: 7
+
+      # 8. 可选：清理 sing-box 进程
+      - name: Cleanup sing-box
+        if: always() && env.PROXY_URL != ''
+        run: |
+          pkill sing-box || true
